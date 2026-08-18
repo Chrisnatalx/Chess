@@ -1495,7 +1495,7 @@ git commit -m "feat(client): cliente de API y consulta periódica con pausa por 
 - Modify: `src/app/page.tsx`
 
 **Interfaces:**
-- Consumes: `useMatch`, `turnoDe`, `apiCreate`, `apiJoin`, `saveCreds`, `loadCreds`, `saveAccessKey`, `loadAccessKey`; `legalMoves` y `applyMove` de `@/core/game`.
+- Consumes: `useMatch`, `turnoDe`, `apiCreate`, `apiJoin`, `saveCreds`, `loadCreds`, `saveAccessKey`, `loadAccessKey`; `applyMove` de `@/core/game`.
 - Produces: la aplicación jugable.
 
 - [ ] **Step 1: Escribir el tablero**
@@ -1506,16 +1506,19 @@ git commit -m "feat(client): cliente de API y consulta periódica con pausa por 
 'use client'
 
 import { Chessboard } from 'react-chessboard'
+import { applyMove } from '@/core/game'
 import type { Color } from '@/core/match-state'
 
 type Props = {
   fen: string
+  /** Historial en SAN. Necesario para validar en el cliente antes de enviar. */
+  history: string[]
   orientation: Color
   puedeMover: boolean
-  onMove: (from: string, to: string) => void
+  onMove: (from: string, to: string, promotion?: string) => void
 }
 
-export function Board({ fen, orientation, puedeMover, onMove }: Props) {
+export function Board({ fen, history, orientation, puedeMover, onMove }: Props) {
   return (
     <Chessboard
       options={{
@@ -1525,10 +1528,24 @@ export function Board({ fen, orientation, puedeMover, onMove }: Props) {
         onPieceDrop: ({ sourceSquare, targetSquare }) => {
           // targetSquare es null cuando se suelta la pieza fuera del tablero.
           if (!targetSquare || !puedeMover) return false
-          onMove(sourceSquare, targetSquare)
-          // Se devuelve true de forma optimista: el tablero se redibuja
-          // desde el FEN que confirme el servidor.
-          return true
+
+          // Validación optimista: se rechaza acá lo que el servidor rechazaría,
+          // así la pieza vuelve a su casilla al instante en vez de parpadear
+          // cuando llega la corrección del servidor.
+          if (applyMove(history, { from: sourceSquare, to: targetSquare })) {
+            onMove(sourceSquare, targetSquare)
+            return true
+          }
+
+          // Un peón que llega a la última fila necesita pieza de coronación.
+          // Se corona a dama sin preguntar; elegir otra pieza es una mejora
+          // posterior, no parte de este hito.
+          if (applyMove(history, { from: sourceSquare, to: targetSquare, promotion: 'q' })) {
+            onMove(sourceSquare, targetSquare, 'q')
+            return true
+          }
+
+          return false
         },
       }}
     />
@@ -1652,9 +1669,10 @@ export default function MatchPage({ params }: { params: Promise<{ id: string }> 
       <div style={{ maxWidth: 480, margin: '0 auto' }}>
         <Board
           fen={match.fen}
+          history={match.history}
           orientation={color ?? 'w'}
           puedeMover={esMiTurno}
-          onMove={(from, to) => { void mover(from, to) }}
+          onMove={(from, to, promotion) => { void mover(from, to, promotion) }}
         />
       </div>
 
@@ -1756,7 +1774,7 @@ export default defineConfig({
 
 Agregar a `package.json`: `"test:e2e": "playwright test"`.
 
-Importante: para esta prueba **no** deben estar las variables de Upstash en el entorno, o el estado irá a Redis real. Con el almacén en memoria alcanza, porque `npm run dev` es un único proceso.
+Nota: la prueba funciona con cualquiera de los dos almacenes. Si `.env.local` tiene credenciales de Upstash, el estado irá a Redis y consumirá unos pocos comandos del free tier; si no las tiene, usa el almacén en memoria, que alcanza porque `npm run dev` es un único proceso.
 
 - [ ] **Step 3: Escribir la prueba**
 
@@ -1780,7 +1798,7 @@ test('dos personas juegan el mate del loco desde dispositivos distintos', async 
 
   // Negras entran por el link y se unen.
   await negras.goto(url)
-  await negras.getByRole('textbox').fill('dev')
+  await negras.locator('input[type=password]').fill('dev')
   await negras.getByRole('button', { name: 'Entrar' }).click()
   await negras.getByRole('button', { name: 'Unirme como negras' }).click()
 
