@@ -1,6 +1,13 @@
 import type { PublicMatch, Color } from '@/core/match-state'
 
-export type Credentials = { accessKey: string; token: string; color: Color }
+// `accessKey` es opcional a propósito: nadie la lee (ver loadAccessKey más
+// abajo, la única fuente real), pero el brief de la tarea 8 llama a
+// saveCreds pasándola («saveCreds(id, { accessKey, token, color })»), y con
+// el campo ausente del tipo ese literal fallaría el chequeo de propiedades
+// excedentes de TypeScript. Se la deja tipada pero sin uso para no romper
+// esa llamada; el token de acceso vive únicamente en loadAccessKey/
+// saveAccessKey.
+export type Credentials = { accessKey?: string; token: string; color: Color }
 
 const claveDe = (id: string) => `chess:creds:${id}`
 
@@ -10,7 +17,15 @@ export function saveCreds(id: string, creds: Credentials): void {
 
 export function loadCreds(id: string): Credentials | null {
   const crudo = localStorage.getItem(claveDe(id))
-  return crudo ? (JSON.parse(crudo) as Credentials) : null
+  if (!crudo) return null
+  try {
+    return JSON.parse(crudo) as Credentials
+  } catch {
+    // localStorage corrupto (edición manual, versión vieja del esquema,
+    // etc.): se degrada a "sin credenciales" en vez de tirar la excepción
+    // hacia arriba y romper el efecto de consulta periódica.
+    return null
+  }
 }
 
 export function saveAccessKey(clave: string): void {
@@ -22,12 +37,38 @@ export function loadAccessKey(): string {
 }
 
 async function pedir<T>(url: string, accessKey: string, init?: RequestInit): Promise<T> {
-  const r = await fetch(url, {
-    ...init,
-    headers: { 'content-type': 'application/json', 'x-access-key': accessKey },
-  })
-  const cuerpo = await r.json()
-  if (!r.ok) throw new Error(cuerpo?.error ?? `http_${r.status}`)
+  // new Headers(...) normaliza cualquier forma de HeadersInit (objeto,
+  // array de tuplas, u otro Headers) en vez de perder init.headers, que es
+  // lo que hacía el spread anterior al reasignar `headers` después de
+  // `...init`.
+  const headers = new Headers(init?.headers)
+  headers.set('content-type', 'application/json')
+  headers.set('x-access-key', accessKey)
+  const r = await fetch(url, { ...init, headers })
+
+  // Se lee como texto primero: un cuerpo de error que no es JSON (una
+  // página de error HTML de un proxy, un 204 sin contenido) haría que
+  // r.json() lance un SyntaxError que llega al usuario como "Unexpected
+  // token '<'", justo en el caso para el que existía el `?? http_${r.status}`
+  // de abajo — con ese fallback inalcanzable porque nunca se llegaba a él.
+  const texto = await r.text()
+  let cuerpo: unknown
+  try {
+    cuerpo = texto ? JSON.parse(texto) : undefined
+  } catch {
+    cuerpo = undefined
+  }
+
+  if (!r.ok) {
+    const codigo =
+      cuerpo !== null &&
+      typeof cuerpo === 'object' &&
+      'error' in cuerpo &&
+      typeof (cuerpo as { error: unknown }).error === 'string'
+        ? (cuerpo as { error: string }).error
+        : `http_${r.status}`
+    throw new Error(codigo)
+  }
   return cuerpo as T
 }
 

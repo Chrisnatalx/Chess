@@ -1,5 +1,9 @@
-import { describe, it, expect } from 'vitest'
-import { shouldPoll, pollInterval } from './useMatch'
+// @vitest-environment jsdom
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { renderHook, act, waitFor } from '@testing-library/react'
+import type { PublicMatch, PublicPlayer } from '@/core/match-state'
+import { shouldPoll, pollInterval, useMatch } from './useMatch'
+import * as api from './api'
 
 describe('shouldPoll', () => {
   it('consulta si la partida espera rival', () => {
@@ -33,4 +37,135 @@ describe('pollInterval', () => {
     expect(pollInterval(120_001)).toBe(15_000)
     expect(pollInterval(600_000)).toBe(15_000)
   })
+})
+
+// --- Pruebas de regresión de la ronda 1 de revisión de la tarea 7 ---------
+//
+// Estas pruebas ejercitan la parte con estado del hook (renderHook, con
+// jsdom) en vez de las funciones puras de arriba. Mockean './api' entero
+// para no depender de fetch/localStorage reales.
+
+vi.mock('./api', () => ({
+  apiGet: vi.fn(),
+  apiMove: vi.fn(),
+  loadAccessKey: vi.fn(() => 'clave'),
+  loadCreds: vi.fn(),
+}))
+
+function jugador(taken: boolean): PublicPlayer {
+  return { kind: 'human', label: 'j', taken, open: !taken }
+}
+
+function partida(
+  ply: number,
+  version: number,
+  status: PublicMatch['status'] = 'active',
+): PublicMatch {
+  return {
+    id: 'm1',
+    history: [],
+    fen: 'fen-de-prueba',
+    ply,
+    status,
+    result: null,
+    reason: null,
+    createdAt: 0,
+    version,
+    players: { w: jugador(true), b: jugador(true) },
+  }
+}
+
+beforeEach(() => {
+  vi.mocked(api.loadCreds).mockReturnValue({ token: 'tok', color: 'w' })
+})
+
+afterEach(() => {
+  // resetAllMocks (no clearAllMocks): también vacía cualquier entrada de
+  // mockResolvedValueOnce/mockImplementationOnce que haya quedado sin
+  // consumir. Importa porque, contra la implementación vieja, el CRÍTICO 1
+  // deja sin consumir su segunda respuesta encolada (esa es justamente la
+  // regresión que prueba) — sin este reset esa respuesta se filtraría a la
+  // siguiente prueba y falsearía el CRÍTICO 2.
+  vi.resetAllMocks()
+  vi.useRealTimers()
+})
+
+describe('useMatch (regresión, con estado)', () => {
+  it(
+    'CRÍTICO 1: un poll fallido no detiene el ciclo para siempre — se reintenta después del intervalo',
+    async () => {
+      vi.useFakeTimers()
+      const get = vi.mocked(api.apiGet)
+      get
+        .mockRejectedValueOnce(new Error('network'))
+        .mockResolvedValueOnce({ match: partida(0, 10) })
+
+      renderHook(() => useMatch('m1'))
+
+      // Primer intento: se dispara solo, al montar. Falla.
+      await vi.waitFor(() => expect(get).toHaveBeenCalledTimes(1))
+
+      // Se avanza el reloj falso lo bastante para cubrir cualquier backoff
+      // razonable tras un solo fallo (el intervalo normal es 4s; incluso
+      // duplicado son 8s, muy por debajo del techo de ~60s).
+      await vi.advanceTimersByTimeAsync(10_000)
+
+      // Contra la implementación vieja esto se queda en 1 para siempre: el
+      // efecto de consulta dependía de `match`, que nunca se actualiza tras
+      // un fallo, así que nunca se reprograma ningún timeout.
+      expect(get).toHaveBeenCalledTimes(2)
+    },
+  )
+
+  it(
+    'CRÍTICO 2: una respuesta de poll vieja en vuelo no pisa una jugada propia más nueva',
+    async () => {
+      const get = vi.mocked(api.apiGet)
+      const move = vi.mocked(api.apiMove)
+
+      const inicial = partida(0, 10)
+      const trasJugada = partida(1, 11)
+      const pollViejo = partida(0, 10) // misma versión que `inicial`: sigue siendo vieja frente a 11.
+
+      let resolverSegundoGet: ((v: { match: PublicMatch }) => void) | undefined
+      get
+        .mockResolvedValueOnce({ match: inicial })
+        .mockImplementationOnce(
+          () => new Promise((resolve) => { resolverSegundoGet = resolve }),
+        )
+      move.mockResolvedValueOnce({ match: trasJugada })
+
+      const { result } = renderHook(() => useMatch('m1'))
+
+      await waitFor(() => expect(result.current.match?.ply).toBe(0))
+
+      // Un refresco manual queda "en vuelo" (no se espera a que resuelva):
+      // simula el poll periódico que ya estaba en camino cuando se hizo la
+      // jugada propia.
+      let refrescoEnVuelo!: Promise<boolean>
+      act(() => {
+        refrescoEnVuelo = result.current.refrescar()
+      })
+      await waitFor(() => expect(get).toHaveBeenCalledTimes(2))
+
+      // La jugada propia se resuelve primero y avanza a ply 1.
+      await act(async () => {
+        await result.current.mover('e2', 'e4')
+      })
+      expect(result.current.match?.ply).toBe(1)
+
+      // Ahora resuelve el poll viejo, con una versión anterior a la que ya
+      // se aplicó.
+      await act(async () => {
+        resolverSegundoGet?.({ match: pollViejo })
+        await refrescoEnVuelo
+      })
+
+      // Contra la implementación vieja, setMatch(m) era incondicional: el
+      // poll viejo pisaba la jugada propia y el ply volvía a 0, además de
+      // dejar la partida en un estado donde una segunda jugada del usuario
+      // mandaría un ply desactualizado y el servidor respondería 409.
+      expect(result.current.match?.ply).toBe(1)
+    },
+  )
 })
