@@ -1,9 +1,12 @@
-import { checkAccess, accessDenied } from '@/server/auth'
+import { withAccess, isValidMatchId } from '@/server/auth'
 import { getStore } from '@/server/store'
-import { submitMove } from '@/server/match'
+import { submitMove, type MoveError } from '@/server/match'
 import { toPublic } from '@/core/match-state'
 
-const ESTADO_HTTP: Record<string, number> = {
+// Tipado como Record<MoveError, number> en vez de Record<string, number>:
+// si el árbitro agrega un resultado nuevo, esto no compila hasta que se
+// decida su código HTTP, en vez de degradar en silencio al 400 por defecto.
+const ESTADO_HTTP: Record<MoveError, number> = {
   not_found: 404,
   not_active: 409,
   stale_ply: 409,
@@ -14,20 +17,38 @@ const ESTADO_HTTP: Record<string, number> = {
   illegal_move: 422,
 }
 
-export async function POST(
+type CuerpoMovimiento = {
+  token: string
+  ply: number
+  from: string
+  to: string
+  promotion?: string
+}
+
+function esCuerpoValido(x: unknown): x is CuerpoMovimiento {
+  if (typeof x !== 'object' || x === null) return false
+  const o = x as Record<string, unknown>
+  return (
+    typeof o.token === 'string' &&
+    typeof o.ply === 'number' &&
+    typeof o.from === 'string' &&
+    typeof o.to === 'string' &&
+    (o.promotion === undefined || typeof o.promotion === 'string')
+  )
+}
+
+export const POST = withAccess(async (
   req: Request,
   { params }: { params: Promise<{ id: string }> },
-) {
-  if (!checkAccess(req)) return accessDenied()
+) => {
   const { id } = await params
-  const cuerpo = await req.json()
+  if (!isValidMatchId(id)) return Response.json({ error: 'not_found' }, { status: 404 })
 
-  if (
-    typeof cuerpo?.token !== 'string' ||
-    typeof cuerpo?.ply !== 'number' ||
-    typeof cuerpo?.from !== 'string' ||
-    typeof cuerpo?.to !== 'string'
-  ) {
+  // Un cuerpo ausente o mal formado (p. ej. un solo byte "{") no debe tirar
+  // la ruta con un 500: cae a null, que ya se trata como bad_request.
+  const cuerpo: unknown = await req.json().catch(() => null)
+
+  if (!esCuerpoValido(cuerpo)) {
     return Response.json({ error: 'bad_request' }, { status: 400 })
   }
 
@@ -36,11 +57,11 @@ export async function POST(
     ply: cuerpo.ply,
     from: cuerpo.from,
     to: cuerpo.to,
-    promotion: typeof cuerpo.promotion === 'string' ? cuerpo.promotion : undefined,
+    promotion: cuerpo.promotion,
   })
 
   if (typeof r === 'string') {
-    return Response.json({ error: r }, { status: ESTADO_HTTP[r] ?? 400 })
+    return Response.json({ error: r }, { status: ESTADO_HTTP[r] })
   }
   return Response.json({ match: toPublic(r) })
-}
+})
