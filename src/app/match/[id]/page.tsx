@@ -59,7 +59,15 @@ export default function MatchPage({ params }: { params: Promise<{ id: string }> 
     )
   }
 
-  if (!match) return <main style={{ padding: 32 }}>Error: {error}</main>
+  if (!match) {
+    return (
+      <main style={{ padding: 32, fontFamily: 'system-ui' }}>
+        {error === 'not_found'
+          ? <p>No encontramos esa partida. Revisá el link.</p>
+          : <p style={{ color: 'crimson' }}>Error: {error}</p>}
+      </main>
+    )
+  }
 
   const esEspectador = color === null
   // Se mira `open`, no `taken`: un asiento de bot no tiene token y con `taken`
