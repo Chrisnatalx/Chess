@@ -9,13 +9,14 @@ function estadoConTokens(): MatchState {
     fen: 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1',
     ply: 0,
     players: {
-      w: { kind: 'human', token: 'secreto-blancas', label: 'Blancas' },
-      b: { kind: 'human', token: 'secreto-negras', label: 'Negras' },
+      w: { kind: 'human', token: 'secreto-blancas', label: 'Blancas', open: false },
+      b: { kind: 'human', token: 'secreto-negras', label: 'Negras', open: false },
     },
     status: 'active',
     result: null,
     reason: null,
     createdAt: 1000,
+    version: 0,
   }
 }
 
@@ -40,5 +41,13 @@ describe('toPublic', () => {
     const resultado = toPublic(estado)
     expect(resultado.players.w.taken).toBe(true)
     expect(resultado.players.b.taken).toBe(false)
+  })
+
+  it('expone open para que el cliente sepa si el asiento espera un humano', () => {
+    const estado = estadoConTokens()
+    estado.players.b.open = true
+    const resultado = toPublic(estado)
+    expect(resultado.players.w.open).toBe(false)
+    expect(resultado.players.b.open).toBe(true)
   })
 })

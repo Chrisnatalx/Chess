@@ -9,7 +9,7 @@ export type Deps = {
 }
 
 export const defaultDeps: Deps = {
-  newId: () => crypto.randomUUID().slice(0, 8),
+  newId: () => crypto.randomUUID(),
   newToken: () => crypto.randomUUID(),
   now: () => Date.now(),
 }
@@ -19,7 +19,7 @@ export type JoinResult = { state: MatchState; token: string; color: Color }
 
 export type MoveError =
   | 'not_found' | 'not_your_turn' | 'stale_ply'
-  | 'illegal_move' | 'not_active' | 'bad_token'
+  | 'illegal_move' | 'not_active' | 'bad_token' | 'conflict'
 
 export type MoveRequest = {
   token: string
@@ -37,13 +37,14 @@ export async function createMatch(store: MatchStore, deps: Deps): Promise<Create
     fen: fenOf([]),
     ply: 0,
     players: {
-      w: { kind: 'human', token, label: 'Blancas' },
-      b: { kind: 'human', token: null, label: 'Negras' },
+      w: { kind: 'human', token, label: 'Blancas', open: false },
+      b: { kind: 'human', token: null, label: 'Negras', open: true },
     },
     status: 'waiting',
     result: null,
     reason: null,
     createdAt: deps.now(),
+    version: 0,
   }
   await store.put(state)
   return { state, token }
@@ -53,18 +54,20 @@ export async function joinMatch(
   store: MatchStore,
   id: string,
   deps: Deps = defaultDeps,
-): Promise<JoinResult | 'not_found' | 'full'> {
+): Promise<JoinResult | 'not_found' | 'full' | 'conflict'> {
   const state = await store.get(id)
   if (!state) return 'not_found'
-  if (state.players.b.token !== null) return 'full'
+  if (!state.players.b.open) return 'full'
 
   const token = deps.newToken()
   const siguiente: MatchState = {
     ...state,
-    players: { ...state.players, b: { ...state.players.b, token } },
+    players: { ...state.players, b: { ...state.players.b, token, open: false } },
     status: 'active',
+    version: state.version + 1,
   }
-  await store.put(siguiente)
+  const ok = await store.putIfVersion(siguiente, state.version)
+  if (!ok) return 'conflict'
   return { state: siguiente, token, color: 'b' }
 }
 
@@ -105,7 +108,9 @@ export async function submitMove(
     status: fin.over ? 'finished' : 'active',
     result: fin.result,
     reason: fin.reason,
+    version: state.version + 1,
   }
-  await store.put(siguiente)
+  const ok = await store.putIfVersion(siguiente, state.version)
+  if (!ok) return 'conflict'
   return siguiente
 }

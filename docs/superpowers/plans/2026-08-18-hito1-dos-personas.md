@@ -1006,6 +1006,9 @@ export async function POST(
   const r = await joinMatch(getStore(), id, defaultDeps)
   if (r === 'not_found') return Response.json({ error: 'not_found' }, { status: 404 })
   if (r === 'full') return Response.json({ error: 'full' }, { status: 409 })
+  // Dos personas abrieron el link a la vez y la otra ganó: para quien pierde
+  // el asiento ya está ocupado, así que se le responde como si estuviera lleno.
+  if (r === 'conflict') return Response.json({ error: 'full' }, { status: 409 })
   return Response.json({ match: toPublic(r.state), token: r.token, color: r.color })
 }
 ```
@@ -1024,6 +1027,8 @@ const ESTADO_HTTP: Record<string, number> = {
   not_found: 404,
   not_active: 409,
   stale_ply: 409,
+  // Otro escritor ganó la carrera. El cliente debe recargar el estado y reintentar.
+  conflict: 409,
   not_your_turn: 403,
   bad_token: 403,
   illegal_move: 422,
@@ -1120,13 +1125,14 @@ function partida(id: string): MatchState {
     fen: 'rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2',
     ply: 2,
     players: {
-      w: { kind: 'human', token: 'tw', label: 'Blancas' },
-      b: { kind: 'human', token: 'tb', label: 'Negras' },
+      w: { kind: 'human', token: 'tw', label: 'Blancas', open: false },
+      b: { kind: 'human', token: 'tb', label: 'Negras', open: false },
     },
     status: 'active',
     result: null,
     reason: null,
     createdAt: 1,
+    version: 0,
   }
 }
 
@@ -1142,6 +1148,30 @@ describe.skipIf(!hayCredenciales)('RedisStore (integración)', () => {
   it('devuelve null para una partida inexistente', async () => {
     const store = new RedisStore()
     expect(await store.get(`no-existe-${Date.now()}`)).toBeNull()
+  })
+
+  it('putIfVersion escribe cuando la versión coincide', async () => {
+    const store = new RedisStore()
+    const id = `test-cas-ok-${Date.now()}`
+    await store.put(partida(id))
+    const ok = await store.putIfVersion({ ...partida(id), ply: 4, version: 1 }, 0)
+    expect(ok).toBe(true)
+    expect((await store.get(id))!.ply).toBe(4)
+  })
+
+  it('putIfVersion rechaza y no toca nada cuando la versión no coincide', async () => {
+    const store = new RedisStore()
+    const id = `test-cas-no-${Date.now()}`
+    await store.put(partida(id))
+    const ok = await store.putIfVersion({ ...partida(id), ply: 9, version: 5 }, 4)
+    expect(ok).toBe(false)
+    expect((await store.get(id))!.ply).toBe(2)
+  })
+
+  it('putIfVersion rechaza sobre una partida inexistente', async () => {
+    const store = new RedisStore()
+    const id = `test-cas-fantasma-${Date.now()}`
+    expect(await store.putIfVersion({ ...partida(id), version: 1 }, 0)).toBe(false)
   })
 })
 ```
@@ -1163,6 +1193,24 @@ import type { MatchStore } from './types'
 /** Las partidas caducan a los 7 días. Es una POC, no un archivo histórico. */
 const TTL_SEGUNDOS = 60 * 60 * 24 * 7
 
+/**
+ * Escritura condicional atómica. La versión vive además en su propia clave
+ * porque compararla dentro del script sin decodificar JSON es más simple y no
+ * depende de que el entorno Lua tenga cjson disponible.
+ *
+ * GET devuelve false cuando la clave no existe, y false nunca es igual a la
+ * versión esperada, así que una partida inexistente cae en conflicto — que es
+ * la respuesta correcta: no se puede sobrescribir lo que no está.
+ */
+const CAS = `
+if redis.call('GET', KEYS[2]) == ARGV[1] then
+  redis.call('SET', KEYS[1], ARGV[2], 'EX', ARGV[4])
+  redis.call('SET', KEYS[2], ARGV[3], 'EX', ARGV[4])
+  return 1
+end
+return 0
+`
+
 export class RedisStore implements MatchStore {
   private redis = Redis.fromEnv()
 
@@ -1170,14 +1218,36 @@ export class RedisStore implements MatchStore {
     return `match:${id}`
   }
 
+  /** Clave hermana que guarda solo la versión, para poder compararla en Lua. */
+  private claveVersion(id: string) {
+    return `match:${id}:v`
+  }
+
   async get(id: string): Promise<MatchState | null> {
-    // El cliente de Upstash deserializa JSON automáticamente.
+    // El cliente de Upstash deserializa JSON automáticamente al leer.
     const valor = await this.redis.get<MatchState>(this.clave(id))
     return valor ?? null
   }
 
   async put(state: MatchState): Promise<void> {
-    await this.redis.set(this.clave(state.id), state, { ex: TTL_SEGUNDOS })
+    // Se guarda el JSON como cadena explícita para que coincida byte a byte
+    // con lo que escribe el script Lua, que solo maneja cadenas.
+    await this.redis.set(this.clave(state.id), JSON.stringify(state), { ex: TTL_SEGUNDOS })
+    await this.redis.set(this.claveVersion(state.id), String(state.version), { ex: TTL_SEGUNDOS })
+  }
+
+  async putIfVersion(state: MatchState, expectedVersion: number): Promise<boolean> {
+    const r = await this.redis.eval<string[], number>(
+      CAS,
+      [this.clave(state.id), this.claveVersion(state.id)],
+      [
+        String(expectedVersion),
+        JSON.stringify(state),
+        String(state.version),
+        String(TTL_SEGUNDOS),
+      ],
+    )
+    return r === 1
   }
 }
 ```
@@ -1661,7 +1731,9 @@ export default function MatchPage({ params }: { params: Promise<{ id: string }> 
   if (!match) return <main style={{ padding: 32 }}>Error: {error}</main>
 
   const esEspectador = color === null
-  const puedeUnirse = esEspectador && match.status === 'waiting' && !match.players.b.taken
+  // Se mira `open`, no `taken`: un asiento de bot no tiene token y con `taken`
+  // se vería vacío, dejando que cualquiera con el link desplace al bot.
+  const puedeUnirse = esEspectador && match.status === 'waiting' && match.players.b.open
   const esMiTurno = color !== null && turnoDe(match) === color && match.status === 'active'
 
   return (
