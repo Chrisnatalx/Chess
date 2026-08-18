@@ -1646,7 +1646,7 @@ export default function Home() {
     try {
       saveAccessKey(clave)
       const r = await apiCreate(clave)
-      saveCreds(r.match.id, { accessKey: clave, token: r.token, color: r.color })
+      saveCreds(r.match.id, { token: r.token, color: r.color })
       router.push(`/match/${r.match.id}`)
     } catch (e) {
       setError(e instanceof Error ? e.message : 'error')
@@ -1703,7 +1703,7 @@ export default function MatchPage({ params }: { params: Promise<{ id: string }> 
   async function unirse() {
     saveAccessKey(clave)
     const r = await apiJoin(id, clave)
-    saveCreds(id, { accessKey: clave, token: r.token, color: r.color })
+    saveCreds(id, { token: r.token, color: r.color })
     setColor(r.color)
     await refrescar()
   }
