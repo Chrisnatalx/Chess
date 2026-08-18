@@ -1,12 +1,34 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+
+// Se fuerza el almacén en memoria para estas pruebas, sin importar si hay
+// credenciales de Upstash en el entorno que invoca el proceso. Sin este
+// stub, cuando el shell exporta las credenciales reales, getStore() elige
+// RedisStore y estas pruebas terminan golpeando la base de datos real en
+// producción — lento (cientos de ms por prueba en vez de unos pocos) y a
+// costa de la cuota gratuita del proyecto.
+//
+// vi.mock se eleva por encima de los imports, así que no puede cerrar
+// sobre un import estático de MemoryStore declarado más abajo en el
+// archivo. Se importa en su lugar dentro de la propia factory (import()
+// perezoso): la factory se evalúa una sola vez, la primera vez que algo
+// importa '@/server/store', así que `almacenCompartido` queda como una
+// única instancia compartida por todo el archivo — justo lo que necesitan
+// las pruebas que crean una partida en una llamada y la leen en otra.
+vi.mock('@/server/store', async () => {
+  const { MemoryStore } = await import('@/server/store/memory')
+  const almacenCompartido = new MemoryStore()
+  return { getStore: () => almacenCompartido }
+})
+
 import { POST as crear } from '@/app/api/match/route'
 import { GET as leer } from '@/app/api/match/[id]/route'
 import { POST as unirse } from '@/app/api/match/[id]/join/route'
 import { POST as mover } from '@/app/api/match/[id]/move/route'
 
-// El almacén es un singleton a nivel de módulo (ver @/server/store), así que
-// las pruebas de este archivo lo comparten. Cada prueba crea su propia
-// partida en vez de depender del orden de ejecución.
+// El almacén es un stub en memoria compartido dentro de este archivo (ver
+// el vi.mock arriba), así que las pruebas de este archivo lo comparten.
+// Cada prueba crea su propia partida en vez de depender del orden de
+// ejecución.
 
 const CLAVE = 'k'
 const original = process.env.ACCESS_KEY
