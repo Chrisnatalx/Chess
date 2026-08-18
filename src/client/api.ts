@@ -1,13 +1,10 @@
 import type { PublicMatch, Color } from '@/core/match-state'
 
-// `accessKey` es opcional a propósito: nadie la lee (ver loadAccessKey más
-// abajo, la única fuente real), pero el brief de la tarea 8 llama a
-// saveCreds pasándola («saveCreds(id, { accessKey, token, color })»), y con
-// el campo ausente del tipo ese literal fallaría el chequeo de propiedades
-// excedentes de TypeScript. Se la deja tipada pero sin uso para no romper
-// esa llamada; el token de acceso vive únicamente en loadAccessKey/
-// saveAccessKey.
-export type Credentials = { accessKey?: string; token: string; color: Color }
+// El token de acceso (`accessKey`) vive únicamente en loadAccessKey/
+// saveAccessKey; no tiene sentido como campo de `Credentials` porque nadie
+// lo leería desde ahí (era peso muerto y una segunda casa para el mismo
+// secreto).
+export type Credentials = { token: string; color: Color }
 
 const claveDe = (id: string) => `chess:creds:${id}`
 
