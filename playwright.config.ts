@@ -13,14 +13,17 @@ export default defineConfig({
   globalSetup: './e2e/global-setup.ts',
   retries: 0,
   reporter: 'list',
-  // Un solo worker: los cinco specs comparten un único `next dev` (un solo
-  // proceso Node, almacén en memoria). Con 4 workers en paralelo, varios
-  // navegadores golpeando ese mismo proceso a la vez (create/join/poll de
-  // varias partidas simultáneas) lo hacían tardar más de los 15s de
-  // `expect.timeout` en responder un simple POST /api/match — no una
-  // aserción lenta, sino contención real de un server de desarrollo de un
-  // solo proceso. Serializar los tests evita esa contención en la raíz, en
-  // vez de subir el timeout para tolerarla.
+  // Un solo worker. La causa real del fallo original NO era contención
+  // general contra un `next dev` de un solo proceso: con `globalSetup` ya
+  // precalentando las rutas (ver arriba), la suite completa pasa 3/3
+  // corridas consecutivas con 4 workers en paralelo. Lo que fallaba era una
+  // carrera de compilación en frío de Turbopack — varios navegadores
+  // pegándole a una ruta que todavía no había compilado ni una sola vez,
+  // justo al arrancar la corrida — y `globalSetup` ya resuelve esa causa de
+  // raíz al forzar esa primera compilación antes de que corra cualquier
+  // test. `workers: 1` queda como seguro adicional, no como el arreglo: no
+  // hay que leer esto como "el paralelismo es inseguro contra este server
+  // de desarrollo en general", porque los datos dicen lo contrario.
   workers: 1,
   expect: {
     // El default de Playwright (5s) alcanza casi siempre, pero el hook de
