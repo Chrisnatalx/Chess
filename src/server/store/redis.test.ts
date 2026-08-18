@@ -61,6 +61,32 @@ describe.skipIf(!hayCredenciales)('RedisStore (integración)', () => {
     const id = `test-cas-fantasma-${Date.now()}`
     expect(await store.putIfVersion({ ...partida(id), version: 1 }, 0)).toBe(false)
   })
+
+  it('put escribe ambas claves atómicamente, con la misma TTL en las dos', async () => {
+    // Round 1 de revisión: put() hacía dos SET independientes. Si el
+    // proceso moría entre medio, quedaba la clave de estado sin su hermana
+    // de versión, y putIfVersion() rechazaba para siempre esa partida sin
+    // ningún diagnóstico visible. Ahora put() es un solo EVAL; esta prueba
+    // confirma contra la base real que las dos claves quedan escritas y que
+    // ambas tienen la TTL esperada.
+    const store = new RedisStore()
+    const redis = Redis.fromEnv()
+    const id = `test-put-ttl-${Date.now()}`
+    await store.put(partida(id))
+
+    const ttlEstado = await redis.ttl(`match:${id}`)
+    const ttlVersion = await redis.ttl(`match:${id}:v`)
+
+    // Se admite un margen para no volverse flaky por la latencia del
+    // round-trip contra la base real: 604800s es el TTL configurado, no un
+    // valor exacto instantáneo.
+    const TTL_ESPERADO = 60 * 60 * 24 * 7
+    const MARGEN = 30
+    expect(ttlEstado).toBeGreaterThan(TTL_ESPERADO - MARGEN)
+    expect(ttlEstado).toBeLessThanOrEqual(TTL_ESPERADO)
+    expect(ttlVersion).toBeGreaterThan(TTL_ESPERADO - MARGEN)
+    expect(ttlVersion).toBeLessThanOrEqual(TTL_ESPERADO)
+  })
 })
 
 // --- Pruebas de unidad con un cliente falso -------------------------------
@@ -85,26 +111,31 @@ function crearClienteFalso() {
 }
 
 describe('RedisStore (unidad, sin credenciales)', () => {
-  it('put escribe la clave de estado y la de versión, ambas como texto', async () => {
-    const { cliente, set } = crearClienteFalso()
+  it('put llama a eval una sola vez, con las dos claves y los argumentos en orden', async () => {
+    // Round 1 de revisión: put() hacía dos SET independientes, sin garantía
+    // de que ambos corrieran. Si el proceso moría entre el primero y el
+    // segundo, quedaba la clave de estado sin su hermana de versión, y
+    // putIfVersion() rechazaba para siempre esa partida. Ahora put() pasa
+    // por un solo EVAL, igual que putIfVersion, así que las dos claves se
+    // escriben atómicamente.
+    const { cliente, set, eval: evalMock } = crearClienteFalso()
+    evalMock.mockResolvedValue(1)
     const store = new RedisStore(cliente)
     const estado = partida('unit-put')
 
     await store.put(estado)
 
-    expect(set).toHaveBeenCalledTimes(2)
-    expect(set).toHaveBeenNthCalledWith(
-      1,
-      'match:unit-put',
+    expect(set).not.toHaveBeenCalled()
+    expect(evalMock).toHaveBeenCalledTimes(1)
+    const [script, keys, args] = evalMock.mock.calls[0] as [string, string[], string[]]
+    expect(typeof script).toBe('string')
+    expect(keys).toEqual(['match:unit-put', 'match:unit-put:v'])
+    expect(args).toEqual([
       JSON.stringify(estado),
-      { ex: TTL_SEGUNDOS },
-    )
-    expect(set).toHaveBeenNthCalledWith(
-      2,
-      'match:unit-put:v',
       String(estado.version),
-      { ex: TTL_SEGUNDOS },
-    )
+      String(TTL_SEGUNDOS),
+    ])
+    args.forEach((a) => expect(typeof a).toBe('string'))
   })
 
   it('putIfVersion llama a eval una sola vez, con las claves y los argumentos en orden', async () => {

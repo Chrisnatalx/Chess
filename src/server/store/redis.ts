@@ -23,6 +23,21 @@ end
 return 0
 `
 
+/**
+ * Escritura incondicional, pero de las dos claves en un solo EVAL para que
+ * sea atómica. `put()` corre una sola vez en el flujo real (createMatch); sin
+ * esto, dos SET independientes dejan una ventana donde puede existir la
+ * clave de estado sin su clave hermana de versión si el proceso muere entre
+ * medio — y entonces putIfVersion() rechaza para siempre porque compara
+ * contra una versión que no está, dejando la partida jugable-nunca-más sin
+ * ningún diagnóstico visible.
+ */
+const PUT = `
+redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[3])
+redis.call('SET', KEYS[2], ARGV[2], 'EX', ARGV[3])
+return 1
+`
+
 export class RedisStore implements MatchStore {
   /**
    * Seam mínimo para pruebas: se puede inyectar un cliente falso. Cuando no
@@ -48,10 +63,14 @@ export class RedisStore implements MatchStore {
   }
 
   async put(state: MatchState): Promise<void> {
+    // Un solo EVAL para las dos claves: ver el comentario de PUT arriba.
     // Se guarda el JSON como cadena explícita para que coincida byte a byte
-    // con lo que escribe el script Lua, que solo maneja cadenas.
-    await this.redis.set(this.clave(state.id), JSON.stringify(state), { ex: TTL_SEGUNDOS })
-    await this.redis.set(this.claveVersion(state.id), String(state.version), { ex: TTL_SEGUNDOS })
+    // con lo que escribe putIfVersion, que solo maneja cadenas.
+    await this.redis.eval<string[], number>(
+      PUT,
+      [this.clave(state.id), this.claveVersion(state.id)],
+      [JSON.stringify(state), String(state.version), String(TTL_SEGUNDOS)],
+    )
   }
 
   async putIfVersion(state: MatchState, expectedVersion: number): Promise<boolean> {
