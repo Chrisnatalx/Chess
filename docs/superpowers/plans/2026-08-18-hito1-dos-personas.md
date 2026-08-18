@@ -1006,6 +1006,9 @@ export async function POST(
   const r = await joinMatch(getStore(), id, defaultDeps)
   if (r === 'not_found') return Response.json({ error: 'not_found' }, { status: 404 })
   if (r === 'full') return Response.json({ error: 'full' }, { status: 409 })
+  // Dos personas abrieron el link a la vez y la otra ganó: para quien pierde
+  // el asiento ya está ocupado, así que se le responde como si estuviera lleno.
+  if (r === 'conflict') return Response.json({ error: 'full' }, { status: 409 })
   return Response.json({ match: toPublic(r.state), token: r.token, color: r.color })
 }
 ```
@@ -1024,6 +1027,8 @@ const ESTADO_HTTP: Record<string, number> = {
   not_found: 404,
   not_active: 409,
   stale_ply: 409,
+  // Otro escritor ganó la carrera. El cliente debe recargar el estado y reintentar.
+  conflict: 409,
   not_your_turn: 403,
   bad_token: 403,
   illegal_move: 422,
@@ -1120,13 +1125,14 @@ function partida(id: string): MatchState {
     fen: 'rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2',
     ply: 2,
     players: {
-      w: { kind: 'human', token: 'tw', label: 'Blancas' },
-      b: { kind: 'human', token: 'tb', label: 'Negras' },
+      w: { kind: 'human', token: 'tw', label: 'Blancas', open: false },
+      b: { kind: 'human', token: 'tb', label: 'Negras', open: false },
     },
     status: 'active',
     result: null,
     reason: null,
     createdAt: 1,
+    version: 0,
   }
 }
 
@@ -1142,6 +1148,30 @@ describe.skipIf(!hayCredenciales)('RedisStore (integración)', () => {
   it('devuelve null para una partida inexistente', async () => {
     const store = new RedisStore()
     expect(await store.get(`no-existe-${Date.now()}`)).toBeNull()
+  })
+
+  it('putIfVersion escribe cuando la versión coincide', async () => {
+    const store = new RedisStore()
+    const id = `test-cas-ok-${Date.now()}`
+    await store.put(partida(id))
+    const ok = await store.putIfVersion({ ...partida(id), ply: 4, version: 1 }, 0)
+    expect(ok).toBe(true)
+    expect((await store.get(id))!.ply).toBe(4)
+  })
+
+  it('putIfVersion rechaza y no toca nada cuando la versión no coincide', async () => {
+    const store = new RedisStore()
+    const id = `test-cas-no-${Date.now()}`
+    await store.put(partida(id))
+    const ok = await store.putIfVersion({ ...partida(id), ply: 9, version: 5 }, 4)
+    expect(ok).toBe(false)
+    expect((await store.get(id))!.ply).toBe(2)
+  })
+
+  it('putIfVersion rechaza sobre una partida inexistente', async () => {
+    const store = new RedisStore()
+    const id = `test-cas-fantasma-${Date.now()}`
+    expect(await store.putIfVersion({ ...partida(id), version: 1 }, 0)).toBe(false)
   })
 })
 ```
@@ -1163,6 +1193,24 @@ import type { MatchStore } from './types'
 /** Las partidas caducan a los 7 días. Es una POC, no un archivo histórico. */
 const TTL_SEGUNDOS = 60 * 60 * 24 * 7
 
+/**
+ * Escritura condicional atómica. La versión vive además en su propia clave
+ * porque compararla dentro del script sin decodificar JSON es más simple y no
+ * depende de que el entorno Lua tenga cjson disponible.
+ *
+ * GET devuelve false cuando la clave no existe, y false nunca es igual a la
+ * versión esperada, así que una partida inexistente cae en conflicto — que es
+ * la respuesta correcta: no se puede sobrescribir lo que no está.
+ */
+const CAS = `
+if redis.call('GET', KEYS[2]) == ARGV[1] then
+  redis.call('SET', KEYS[1], ARGV[2], 'EX', ARGV[4])
+  redis.call('SET', KEYS[2], ARGV[3], 'EX', ARGV[4])
+  return 1
+end
+return 0
+`
+
 export class RedisStore implements MatchStore {
   private redis = Redis.fromEnv()
 
@@ -1170,14 +1218,36 @@ export class RedisStore implements MatchStore {
     return `match:${id}`
   }
 
+  /** Clave hermana que guarda solo la versión, para poder compararla en Lua. */
+  private claveVersion(id: string) {
+    return `match:${id}:v`
+  }
+
   async get(id: string): Promise<MatchState | null> {
-    // El cliente de Upstash deserializa JSON automáticamente.
+    // El cliente de Upstash deserializa JSON automáticamente al leer.
     const valor = await this.redis.get<MatchState>(this.clave(id))
     return valor ?? null
   }
 
   async put(state: MatchState): Promise<void> {
-    await this.redis.set(this.clave(state.id), state, { ex: TTL_SEGUNDOS })
+    // Se guarda el JSON como cadena explícita para que coincida byte a byte
+    // con lo que escribe el script Lua, que solo maneja cadenas.
+    await this.redis.set(this.clave(state.id), JSON.stringify(state), { ex: TTL_SEGUNDOS })
+    await this.redis.set(this.claveVersion(state.id), String(state.version), { ex: TTL_SEGUNDOS })
+  }
+
+  async putIfVersion(state: MatchState, expectedVersion: number): Promise<boolean> {
+    const r = await this.redis.eval<string[], number>(
+      CAS,
+      [this.clave(state.id), this.claveVersion(state.id)],
+      [
+        String(expectedVersion),
+        JSON.stringify(state),
+        String(state.version),
+        String(TTL_SEGUNDOS),
+      ],
+    )
+    return r === 1
   }
 }
 ```
@@ -1495,7 +1565,7 @@ git commit -m "feat(client): cliente de API y consulta periódica con pausa por 
 - Modify: `src/app/page.tsx`
 
 **Interfaces:**
-- Consumes: `useMatch`, `turnoDe`, `apiCreate`, `apiJoin`, `saveCreds`, `loadCreds`, `saveAccessKey`, `loadAccessKey`; `legalMoves` y `applyMove` de `@/core/game`.
+- Consumes: `useMatch`, `turnoDe`, `apiCreate`, `apiJoin`, `saveCreds`, `loadCreds`, `saveAccessKey`, `loadAccessKey`; `applyMove` de `@/core/game`.
 - Produces: la aplicación jugable.
 
 - [ ] **Step 1: Escribir el tablero**
@@ -1506,16 +1576,19 @@ git commit -m "feat(client): cliente de API y consulta periódica con pausa por 
 'use client'
 
 import { Chessboard } from 'react-chessboard'
+import { applyMove } from '@/core/game'
 import type { Color } from '@/core/match-state'
 
 type Props = {
   fen: string
+  /** Historial en SAN. Necesario para validar en el cliente antes de enviar. */
+  history: string[]
   orientation: Color
   puedeMover: boolean
-  onMove: (from: string, to: string) => void
+  onMove: (from: string, to: string, promotion?: string) => void
 }
 
-export function Board({ fen, orientation, puedeMover, onMove }: Props) {
+export function Board({ fen, history, orientation, puedeMover, onMove }: Props) {
   return (
     <Chessboard
       options={{
@@ -1525,10 +1598,24 @@ export function Board({ fen, orientation, puedeMover, onMove }: Props) {
         onPieceDrop: ({ sourceSquare, targetSquare }) => {
           // targetSquare es null cuando se suelta la pieza fuera del tablero.
           if (!targetSquare || !puedeMover) return false
-          onMove(sourceSquare, targetSquare)
-          // Se devuelve true de forma optimista: el tablero se redibuja
-          // desde el FEN que confirme el servidor.
-          return true
+
+          // Validación optimista: se rechaza acá lo que el servidor rechazaría,
+          // así la pieza vuelve a su casilla al instante en vez de parpadear
+          // cuando llega la corrección del servidor.
+          if (applyMove(history, { from: sourceSquare, to: targetSquare })) {
+            onMove(sourceSquare, targetSquare)
+            return true
+          }
+
+          // Un peón que llega a la última fila necesita pieza de coronación.
+          // Se corona a dama sin preguntar; elegir otra pieza es una mejora
+          // posterior, no parte de este hito.
+          if (applyMove(history, { from: sourceSquare, to: targetSquare, promotion: 'q' })) {
+            onMove(sourceSquare, targetSquare, 'q')
+            return true
+          }
+
+          return false
         },
       }}
     />
@@ -1559,7 +1646,7 @@ export default function Home() {
     try {
       saveAccessKey(clave)
       const r = await apiCreate(clave)
-      saveCreds(r.match.id, { accessKey: clave, token: r.token, color: r.color })
+      saveCreds(r.match.id, { token: r.token, color: r.color })
       router.push(`/match/${r.match.id}`)
     } catch (e) {
       setError(e instanceof Error ? e.message : 'error')
@@ -1616,7 +1703,7 @@ export default function MatchPage({ params }: { params: Promise<{ id: string }> 
   async function unirse() {
     saveAccessKey(clave)
     const r = await apiJoin(id, clave)
-    saveCreds(id, { accessKey: clave, token: r.token, color: r.color })
+    saveCreds(id, { token: r.token, color: r.color })
     setColor(r.color)
     await refrescar()
   }
@@ -1644,7 +1731,9 @@ export default function MatchPage({ params }: { params: Promise<{ id: string }> 
   if (!match) return <main style={{ padding: 32 }}>Error: {error}</main>
 
   const esEspectador = color === null
-  const puedeUnirse = esEspectador && match.status === 'waiting' && !match.players.b.taken
+  // Se mira `open`, no `taken`: un asiento de bot no tiene token y con `taken`
+  // se vería vacío, dejando que cualquiera con el link desplace al bot.
+  const puedeUnirse = esEspectador && match.status === 'waiting' && match.players.b.open
   const esMiTurno = color !== null && turnoDe(match) === color && match.status === 'active'
 
   return (
@@ -1652,9 +1741,10 @@ export default function MatchPage({ params }: { params: Promise<{ id: string }> 
       <div style={{ maxWidth: 480, margin: '0 auto' }}>
         <Board
           fen={match.fen}
+          history={match.history}
           orientation={color ?? 'w'}
           puedeMover={esMiTurno}
-          onMove={(from, to) => { void mover(from, to) }}
+          onMove={(from, to, promotion) => { void mover(from, to, promotion) }}
         />
       </div>
 
@@ -1756,7 +1846,7 @@ export default defineConfig({
 
 Agregar a `package.json`: `"test:e2e": "playwright test"`.
 
-Importante: para esta prueba **no** deben estar las variables de Upstash en el entorno, o el estado irá a Redis real. Con el almacén en memoria alcanza, porque `npm run dev` es un único proceso.
+Nota: la prueba funciona con cualquiera de los dos almacenes. Si `.env.local` tiene credenciales de Upstash, el estado irá a Redis y consumirá unos pocos comandos del free tier; si no las tiene, usa el almacén en memoria, que alcanza porque `npm run dev` es un único proceso.
 
 - [ ] **Step 3: Escribir la prueba**
 
@@ -1780,7 +1870,7 @@ test('dos personas juegan el mate del loco desde dispositivos distintos', async 
 
   // Negras entran por el link y se unen.
   await negras.goto(url)
-  await negras.getByRole('textbox').fill('dev')
+  await negras.locator('input[type=password]').fill('dev')
   await negras.getByRole('button', { name: 'Entrar' }).click()
   await negras.getByRole('button', { name: 'Unirme como negras' }).click()
 
