@@ -1,7 +1,7 @@
 export type ModoTablero = '2d' | '3d'
 
 const CLAVE = 'chess:tablero'
-const POR_DEFECTO: ModoTablero = '3d'
+export const POR_DEFECTO: ModoTablero = '3d'
 
 export function cargarPreferencia(): ModoTablero {
   if (typeof localStorage === 'undefined') return POR_DEFECTO

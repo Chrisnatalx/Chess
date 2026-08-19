@@ -3,16 +3,20 @@
 import { useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { apiCreate, saveAccessKey, saveCreds, loadAccessKey } from '@/client/api'
+import { useValorDelNavegador } from '@/client/useValorDelNavegador'
 
 export default function Home() {
   const router = useRouter()
   // `loadAccessKey` lee localStorage, que no existe durante el prerenderizado
-  // en el servidor (`next build`/SSR corren en Node, sin `window`). Se evita
-  // llamarla ahí y se arranca en '' en ese caso; en el cliente, el
-  // inicializador perezoso de useState sí la lee, en el primer render.
-  const [clave, setClave] = useState(() => (
-    typeof window === 'undefined' ? '' : loadAccessKey()
-  ))
+  // en el servidor. `useValorDelNavegador` (useSyncExternalStore por debajo)
+  // arranca en '' tanto en el servidor como en el primer render del cliente
+  // — así los dos coinciden y React no reporta un mismatch de hidratación —
+  // y recién después de montar se actualiza al valor real de localStorage.
+  // El campo sigue siendo editable: `claveEditada` es la edición del usuario,
+  // que gana sobre el valor guardado en cuanto existe (incluso si es '').
+  const claveGuardada = useValorDelNavegador(loadAccessKey, '')
+  const [claveEditada, setClaveEditada] = useState<string | null>(null)
+  const clave = claveEditada ?? claveGuardada
   const [error, setError] = useState<string | null>(null)
   const [creando, setCreando] = useState(false)
 
@@ -38,7 +42,7 @@ export default function Home() {
         <input
           type="password"
           value={clave}
-          onChange={(e) => setClave(e.target.value)}
+          onChange={(e) => setClaveEditada(e.target.value)}
           style={{ display: 'block', width: '100%', padding: 8, marginTop: 4 }}
         />
       </label>

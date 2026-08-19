@@ -1,12 +1,13 @@
 'use client'
 
-import { use, useEffect, useState } from 'react'
+import { use, useState } from 'react'
 import dynamic from 'next/dynamic'
 import { Board2D } from '@/components/Board2D'
 import { SelectorTablero } from '@/components/SelectorTablero'
 import { useMatch, turnoDe } from '@/client/useMatch'
 import { apiJoin, loadAccessKey, loadCreds, saveAccessKey, saveCreds } from '@/client/api'
-import { cargarPreferencia, soportaWebGL, type ModoTablero } from '@/client/preferenciaTablero'
+import { cargarPreferencia, soportaWebGL, POR_DEFECTO, type ModoTablero } from '@/client/preferenciaTablero'
+import { useValorDelNavegador } from '@/client/useValorDelNavegador'
 import type { Color } from '@/core/match-state'
 
 // Importación diferida y sin render en servidor: Three.js pesa, y quien
@@ -83,50 +84,71 @@ function mensajeDeUnirse(codigo: string): string {
 // uno a otro no reacomoda nada alrededor.
 const LADO_TABLERO = 'min(92vw, 900px, calc(100dvh - 260px))'
 
+// `soportaWebGL` crea un contexto WebGL para probar soporte y no lo libera.
+// `useValorDelNavegador` (useSyncExternalStore por debajo) llama a su
+// `leerValor` en cada render — este componente vuelve a renderizar seguido
+// por el sondeo de `useMatch` — así que llamar a `soportaWebGL()` sin
+// memoizar agotaría el límite de contextos WebGL concurrentes que impone el
+// navegador. Se cachea a nivel de módulo: la prueba real corre una sola vez
+// por carga de página, no una vez por cada snapshot pedido.
+let soporteWebGLCacheado: boolean | undefined
+function leerSoporteWebGL(): boolean {
+  if (soporteWebGLCacheado === undefined) {
+    soporteWebGLCacheado = soportaWebGL()
+  }
+  return soporteWebGLCacheado
+}
+
 export default function MatchPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params)
   const { match, errorSincronizacion, errorJugada, mover, refrescar, esperaAbandonada } = useMatch(id)
-  // Estado derivado de localStorage al montar (`loadCreds` es un sistema
-  // externo a React, no algo que sincronizar con un efecto): salvo eso,
-  // solo cambia cuando `unirse` lo asigna directamente tras unirse.
-  // El guard de `window` evita tocar localStorage durante el prerenderizado
-  // en el servidor, donde no existe (ver mismo comentario en page.tsx).
-  const [color, setColor] = useState<Color | null>(() => (
-    typeof window === 'undefined' ? null : loadCreds(id)?.color ?? null
-  ))
-  const [clave, setClave] = useState(() => (
-    typeof window === 'undefined' ? '' : loadAccessKey()
-  ))
+  // `loadCreds`/`loadAccessKey` leen localStorage, que no existe durante el
+  // prerenderizado en el servidor. `useValorDelNavegador` (useSyncExternalStore
+  // por debajo) arranca en el mismo valor en el servidor y en el primer
+  // render del cliente — por construcción, no por casualidad — y recién
+  // después de montar pasa al valor real de localStorage. Sin esto (como
+  // antes, con un guard de `typeof window` dentro de un inicializador
+  // perezoso de useState) el primer render del cliente difiere del HTML del
+  // servidor y React reporta un mismatch de hidratación.
+  const colorGuardado = useValorDelNavegador(() => loadCreds(id)?.color ?? null, null)
+  // `colorAsignado` es la asignación explícita que hace `unirse()` al
+  // ocupar un asiento: una vez que existe, gana sobre lo leído de
+  // localStorage (que en ese momento todavía no se actualizó a lo que
+  // `saveCreds` recién guardó).
+  const [colorAsignado, setColorAsignado] = useState<Color | null>(null)
+  const color = colorAsignado ?? colorGuardado
+
+  const claveGuardada = useValorDelNavegador(loadAccessKey, '')
+  const [claveEditada, setClaveEditada] = useState<string | null>(null)
+  const clave = claveEditada ?? claveGuardada
+
   const [copiado, setCopiado] = useState(false)
   const [uniendose, setUniendose] = useState(false)
   const [errorUnirse, setErrorUnirse] = useState<string | null>(null)
 
-  // Modo de tablero: empieza sin resolver (`null`) y se decide en un efecto
-  // que corre una sola vez al montar, nunca durante el render. `document` y
-  // `localStorage` no existen en el servidor, y este proyecto ya se quemó
-  // con un `ReferenceError: localStorage is not defined` que solo aparecía
-  // en `next build`, no en las pruebas ni en `next dev`. Mientras `modo` es
-  // `null` no se monta ningún tablero, así que Board3D (con Three.js
-  // adentro) no se descarga hasta saber que corresponde.
-  const [modo, setModo] = useState<ModoTablero | null>(null)
-  const [webglDisponible, setWebglDisponible] = useState(false)
-  const [avisoSinWebGL, setAvisoSinWebGL] = useState(false)
-
-  useEffect(() => {
-    function resolverModoInicial() {
-      const disponible = soportaWebGL()
-      setWebglDisponible(disponible)
-      if (disponible) {
-        setModo(cargarPreferencia())
-      } else {
-        // Sin WebGL el 3D no puede funcionar: se cae a 2D y se avisa una
-        // vez, en vez de ofrecer un interruptor con una opción rota.
-        setModo('2d')
-        setAvisoSinWebGL(true)
-      }
-    }
-    resolverModoInicial()
-  }, [])
+  // Modo de tablero: `soportaWebGL` y la preferencia guardada son, otra vez,
+  // lecturas del navegador. Ambas arrancan "sin resolver" (`null`) en el
+  // servidor y en el primer render del cliente, y pasan a su valor real
+  // recién después de montar — nunca con un `setState` dentro de un efecto.
+  // (Antes ese cálculo vivía en una función anidada dentro de un `useEffect`
+  // únicamente para esquivar `react-hooks/set-state-in-effect`: la regla no
+  // dejaba de aplicar de verdad, porque las llamadas seguían siendo
+  // síncronas en el mismo tick — era un punto ciego de la detección, no una
+  // diferencia semántica.) Mientras `webglEstado` es `null` no se sabe
+  // todavía si el 3D es viable, así que no se monta ningún tablero: Board3D
+  // (con Three.js adentro) no se descarga hasta saber que corresponde.
+  const webglEstado = useValorDelNavegador<boolean | null>(leerSoporteWebGL, null)
+  const preferencia = useValorDelNavegador<ModoTablero | null>(cargarPreferencia, null)
+  const modoPorDefecto: ModoTablero | null =
+    webglEstado === null ? null : webglEstado ? (preferencia ?? POR_DEFECTO) : '2d'
+  // Sin WebGL el 3D no puede funcionar: se cae a 2D y se avisa una vez, en
+  // vez de ofrecer un interruptor con una opción rota.
+  const avisoSinWebGL = webglEstado === false
+  // El interruptor 2D/3D asigna acá; hasta que el usuario lo toque, se usa
+  // el valor por defecto derivado arriba (preferencia guardada, o 2D si no
+  // hay WebGL).
+  const [modoElegido, setModoElegido] = useState<ModoTablero | null>(null)
+  const modo = modoElegido ?? modoPorDefecto
 
   async function unirse() {
     setUniendose(true)
@@ -135,7 +157,7 @@ export default function MatchPage({ params }: { params: Promise<{ id: string }> 
       saveAccessKey(clave)
       const r = await apiJoin(id, clave)
       saveCreds(id, { token: r.token, color: r.color })
-      setColor(r.color)
+      setColorAsignado(r.color)
       await refrescar()
     } catch (e) {
       setErrorUnirse(e instanceof Error ? e.message : 'error')
@@ -161,7 +183,7 @@ export default function MatchPage({ params }: { params: Promise<{ id: string }> 
         <input
           type="password"
           value={clave}
-          onChange={(e) => setClave(e.target.value)}
+          onChange={(e) => setClaveEditada(e.target.value)}
           style={{ display: 'block', width: '100%', padding: 8, marginBottom: 8 }}
         />
         <button onClick={() => { saveAccessKey(clave); void refrescar() }}>Entrar</button>
@@ -197,7 +219,7 @@ export default function MatchPage({ params }: { params: Promise<{ id: string }> 
     <main style={{ maxWidth: 960, margin: '2rem auto', fontFamily: 'system-ui' }}>
       <div style={{ width: LADO_TABLERO, margin: '0 auto' }}>
         {modo !== null && (
-          <SelectorTablero modo={modo} webglDisponible={webglDisponible} onCambiar={setModo} />
+          <SelectorTablero modo={modo} webglDisponible={webglEstado === true} onCambiar={setModoElegido} />
         )}
         {avisoSinWebGL && (
           <p style={{ color: 'var(--muted-foreground)' }}>
