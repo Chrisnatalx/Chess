@@ -6,18 +6,46 @@ import { useMatch, turnoDe } from '@/client/useMatch'
 import { apiJoin, loadAccessKey, loadCreds, saveAccessKey, saveCreds } from '@/client/api'
 import type { Color } from '@/core/match-state'
 
+// Traduce los códigos crudos que devuelve el servidor (o que sintetiza
+// `pedir()` en @/client/api para una respuesta sin cuerpo JSON) a frases en
+// español: sin esto, una UI en español termina filtrando identificadores en
+// inglés al jugador ("Movimiento rechazado: not_found").
+const MENSAJES_DE_ERROR: Record<string, string> = {
+  http_500: 'Hubo un error en el servidor. Reintentando…',
+  not_found: 'Esta partida ya no existe.',
+  not_active: 'La partida ya terminó.',
+  illegal_move: 'Esa jugada no es válida.',
+  not_your_turn: 'No es tu turno.',
+  bad_request: 'Hubo un problema con la solicitud.',
+  bad_token: 'Tu sesión en esta partida ya no es válida.',
+  stale_ply: 'El rival se adelantó, sincronizando…',
+  conflict: 'El rival se adelantó, sincronizando…',
+  full: 'Alguien más ocupó el asiento.',
+}
+
+function mensajeDeError(codigo: string): string {
+  return MENSAJES_DE_ERROR[codigo] ?? 'Sin conexión. Reintentando…'
+}
+
 // `conflict` y `stale_ply` (ambos HTTP 409) significan "el rival se
 // adelantó y ya movió", no que el jugador haya hecho algo mal: el hook
-// vuelve a consultar el estado real apenas pasa esto. Mostrarlo con el
-// mismo tono que un movimiento realmente ilegal (`illegal_move`,
-// `not_your_turn`) culparía al jugador por una carrera que no causó.
-function esErrorDeSincronizacion(codigo: string): boolean {
-  return codigo === 'conflict' || codigo === 'stale_ply'
+// vuelve a consultar el estado real apenas pasa esto. Lo mismo aplica a
+// `not_found`/`not_active` (la partida expiró o terminó, no una jugada
+// mala) y a cualquier código no reconocido (típicamente un problema de red,
+// no un rechazo real). Mostrarlos con el mismo tono que un movimiento
+// realmente ilegal (`illegal_move`, `not_your_turn`, `bad_token`,
+// `bad_request`) culparía al jugador por algo que no causó.
+const CODIGOS_NO_CULPABILIZANTES = new Set([
+  'conflict', 'stale_ply', 'not_found', 'not_active', 'full',
+])
+
+function esRechazoDelJugador(codigo: string): boolean {
+  return codigo in MENSAJES_DE_ERROR && !CODIGOS_NO_CULPABILIZANTES.has(codigo)
 }
 
 export default function MatchPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params)
-  const { match, error, mover, refrescar } = useMatch(id)
+  const { match, errorSincronizacion, errorJugada, mover, refrescar } = useMatch(id)
   // Estado derivado de localStorage al montar (`loadCreds` es un sistema
   // externo a React, no algo que sincronizar con un efecto): salvo eso,
   // solo cambia cuando `unirse` lo asigna directamente tras unirse.
@@ -39,11 +67,11 @@ export default function MatchPage({ params }: { params: Promise<{ id: string }> 
     await refrescar()
   }
 
-  if (!match && !error) {
+  if (!match && !errorSincronizacion) {
     return <main style={{ padding: 32, fontFamily: 'system-ui' }}>Cargando…</main>
   }
 
-  if (error === 'forbidden') {
+  if (errorSincronizacion === 'forbidden') {
     return (
       <main style={{ maxWidth: 420, margin: '4rem auto', fontFamily: 'system-ui' }}>
         <h1>Partida</h1>
@@ -62,9 +90,9 @@ export default function MatchPage({ params }: { params: Promise<{ id: string }> 
   if (!match) {
     return (
       <main style={{ padding: 32, fontFamily: 'system-ui' }}>
-        {error === 'not_found'
+        {errorSincronizacion === 'not_found'
           ? <p>No encontramos esa partida. Revisá el link.</p>
-          : <p style={{ color: 'crimson' }}>Error: {error}</p>}
+          : <p style={{ color: 'crimson' }}>{mensajeDeError(errorSincronizacion ?? '')}</p>}
       </main>
     )
   }
@@ -109,10 +137,17 @@ export default function MatchPage({ params }: { params: Promise<{ id: string }> 
           <p>Partida terminada: {match.result} ({match.reason})</p>
         )}
         {esEspectador && !puedeUnirse && <p>Estás mirando como espectador.</p>}
-        {error && error !== 'forbidden' && (
-          esErrorDeSincronizacion(error)
-            ? <p style={{ color: '#666' }}>El rival se adelantó, sincronizando…</p>
-            : <p style={{ color: 'crimson' }}>Movimiento rechazado: {error}</p>
+        {/* Rechazo de jugada y aviso de sincronización son canales separados
+            (ver useMatch): el segundo nunca pisa al primero, y el rechazo
+            queda visible hasta el próximo intento en vez de desaparecer
+            solo con el próximo sondeo exitoso. */}
+        {errorJugada && (
+          esRechazoDelJugador(errorJugada)
+            ? <p style={{ color: 'crimson' }}>Movimiento rechazado: {mensajeDeError(errorJugada)}</p>
+            : <p style={{ color: 'var(--muted-foreground)' }}>{mensajeDeError(errorJugada)}</p>
+        )}
+        {!errorJugada && errorSincronizacion && errorSincronizacion !== 'forbidden' && (
+          <p style={{ color: 'var(--muted-foreground)' }}>{mensajeDeError(errorSincronizacion)}</p>
         )}
       </section>
     </main>

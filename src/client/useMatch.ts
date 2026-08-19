@@ -34,7 +34,13 @@ export function pollInterval(msDesdeUltimoCambio: number): number {
 
 export function useMatch(id: string) {
   const [match, setMatch] = useState<PublicMatch | null>(null)
-  const [error, setError] = useState<string | null>(null)
+  // Dos canales separados a propósito: un fallo de sondeo (refrescar) no es
+  // lo mismo que un rechazo de jugada (mover), y mezclarlos en un solo
+  // estado producía dos bugs — un GET abortado por la red se mostraba como
+  // "Movimiento rechazado", y un rechazo real desaparecía solo porque el
+  // siguiente sondeo exitoso limpiaba el mismo estado que usaba la jugada.
+  const [errorSincronizacion, setErrorSincronizacion] = useState<string | null>(null)
+  const [errorJugada, setErrorJugada] = useState<string | null>(null)
 
   // Espejo de `match` en un ref: así refrescar/mover/tick leen el estado más
   // reciente sin necesitar `match` en su lista de dependencias, lo que evita
@@ -75,11 +81,13 @@ export function useMatch(id: string) {
     try {
       const { match: m } = await apiGet(id, loadAccessKey())
       aplicarRef.current(m)
-      setError(null)
+      setErrorSincronizacion(null)
       fallosConsecutivos.current = 0
       return true
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'error')
+      // Solo toca su propio canal: un sondeo fallido no debe pisar ni
+      // borrar el rechazo de una jugada que sigue vigente.
+      setErrorSincronizacion(e instanceof Error ? e.message : 'error')
       fallosConsecutivos.current += 1
       return false
     }
@@ -171,10 +179,14 @@ export function useMatch(id: string) {
           token: creds.token, ply: actual.ply, from, to, promotion,
         })
         aplicarRef.current(m)
+        setErrorJugada(null)
         fallosConsecutivos.current = 0
         return true
       } catch (e) {
-        setError(e instanceof Error ? e.message : 'error')
+        // Solo toca su propio canal: se mantiene visible hasta el próximo
+        // intento de jugada, sin que un refrescar() exitoso (el de más
+        // abajo, o cualquier poll posterior) lo borre solo.
+        setErrorJugada(e instanceof Error ? e.message : 'error')
         // Se incrementa el contador acá mismo, de forma síncrona, y no solo
         // a través del refrescar() de abajo: eso fuerza a que los próximos
         // ticks consulten sin importar `shouldPoll`, incluso si ese
@@ -189,7 +201,7 @@ export function useMatch(id: string) {
     [id, refrescar],
   )
 
-  return { match, error, mover, refrescar }
+  return { match, errorSincronizacion, errorJugada, mover, refrescar }
 }
 
 /** El turno se deriva del ply: par = blancas, impar = negras. */
