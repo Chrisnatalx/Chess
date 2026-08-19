@@ -182,7 +182,6 @@ function SceneContents({ pieces, selected, hovered, legalDestinations, onSquareC
   const wasDrag = useWasDrag()
   const { gl } = useThree()
   const pieceHitRef = useRef<string | null>(null)
-  const squareHitRef = useRef<string | null>(null)
   const hoverPieceRef = useRef<string | null>(null)
   const hoverSquareRef = useRef<string | null>(null)
 
@@ -190,7 +189,6 @@ function SceneContents({ pieces, selected, hovered, legalDestinations, onSquareC
     (square: string) => {
       const pieceSquare = pieceHitRef.current
       pieceHitRef.current = null
-      squareHitRef.current = null
       if (wasDrag()) return
       onSquareClick({ pieceSquare, square })
     },

@@ -1,10 +1,21 @@
 'use client'
 
-import { use, useState } from 'react'
+import { use, useEffect, useState } from 'react'
+import dynamic from 'next/dynamic'
 import { Board2D } from '@/components/Board2D'
+import { SelectorTablero } from '@/components/SelectorTablero'
 import { useMatch, turnoDe } from '@/client/useMatch'
 import { apiJoin, loadAccessKey, loadCreds, saveAccessKey, saveCreds } from '@/client/api'
+import { cargarPreferencia, soportaWebGL, type ModoTablero } from '@/client/preferenciaTablero'
 import type { Color } from '@/core/match-state'
+
+// Importación diferida y sin render en servidor: Three.js pesa, y quien
+// juegue en 2D no debe descargarlo. `ssr: false` además evita que WebGL se
+// toque durante el render del servidor, donde no existe.
+const Board3D = dynamic(
+  () => import('@/components/board3d/Board3D').then((m) => m.Board3D),
+  { ssr: false, loading: () => <p>Cargando tablero 3D…</p> },
+)
 
 // Traduce los códigos crudos que devuelve el servidor (o que sintetiza
 // `pedir()` en @/client/api para una respuesta sin cuerpo JSON) a frases en
@@ -72,6 +83,33 @@ export default function MatchPage({ params }: { params: Promise<{ id: string }> 
   const [uniendose, setUniendose] = useState(false)
   const [errorUnirse, setErrorUnirse] = useState<string | null>(null)
 
+  // Modo de tablero: empieza sin resolver (`null`) y se decide en un efecto
+  // que corre una sola vez al montar, nunca durante el render. `document` y
+  // `localStorage` no existen en el servidor, y este proyecto ya se quemó
+  // con un `ReferenceError: localStorage is not defined` que solo aparecía
+  // en `next build`, no en las pruebas ni en `next dev`. Mientras `modo` es
+  // `null` no se monta ningún tablero, así que Board3D (con Three.js
+  // adentro) no se descarga hasta saber que corresponde.
+  const [modo, setModo] = useState<ModoTablero | null>(null)
+  const [webglDisponible, setWebglDisponible] = useState(false)
+  const [avisoSinWebGL, setAvisoSinWebGL] = useState(false)
+
+  useEffect(() => {
+    function resolverModoInicial() {
+      const disponible = soportaWebGL()
+      setWebglDisponible(disponible)
+      if (disponible) {
+        setModo(cargarPreferencia())
+      } else {
+        // Sin WebGL el 3D no puede funcionar: se cae a 2D y se avisa una
+        // vez, en vez de ofrecer un interruptor con una opción rota.
+        setModo('2d')
+        setAvisoSinWebGL(true)
+      }
+    }
+    resolverModoInicial()
+  }, [])
+
   async function unirse() {
     setUniendose(true)
     setErrorUnirse(null)
@@ -129,16 +167,28 @@ export default function MatchPage({ params }: { params: Promise<{ id: string }> 
   const puedeUnirse = esEspectador && match.status === 'waiting' && match.players.b.open
   const esMiTurno = color !== null && turnoDe(match) === color && match.status === 'active'
 
+  const propsTablero = {
+    fen: match.fen,
+    history: match.history,
+    orientation: color ?? 'w',
+    puedeMover: esMiTurno,
+    onMove: (from: string, to: string, promotion?: string) => { void mover(from, to, promotion) },
+  }
+
   return (
     <main style={{ maxWidth: 560, margin: '2rem auto', fontFamily: 'system-ui' }}>
       <div style={{ maxWidth: 480, margin: '0 auto' }}>
-        <Board2D
-          fen={match.fen}
-          history={match.history}
-          orientation={color ?? 'w'}
-          puedeMover={esMiTurno}
-          onMove={(from, to, promotion) => { void mover(from, to, promotion) }}
-        />
+        {modo !== null && (
+          <SelectorTablero modo={modo} webglDisponible={webglDisponible} onCambiar={setModo} />
+        )}
+        {avisoSinWebGL && (
+          <p style={{ color: 'var(--muted-foreground)' }}>
+            Tu navegador no soporta el tablero 3D: mostrando el tablero 2D.
+          </p>
+        )}
+        {modo === null && <p>Cargando tablero…</p>}
+        {modo === '3d' && <Board3D {...propsTablero} />}
+        {modo === '2d' && <Board2D {...propsTablero} />}
       </div>
 
       <section style={{ marginTop: 16 }}>
