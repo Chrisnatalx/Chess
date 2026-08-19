@@ -49,6 +49,29 @@ describe('applyMove', () => {
     expect(r).not.toBeNull()
     expect(r!.san).toContain('=Q')
   })
+
+  it('permite el enroque corto (e1->g1) y lo registra como O-O', () => {
+    const historial = ['Nf3', 'Nf6', 'g3', 'g6', 'Bg2', 'Bg7']
+    const r = applyMove(historial, { from: 'e1', to: 'g1' })
+    expect(r).not.toBeNull()
+    expect(r!.san).toBe('O-O')
+  })
+
+  it('permite el enroque largo (e1->c1) y lo registra como O-O-O', () => {
+    const historial = ['d4', 'd5', 'Nc3', 'Nc6', 'Bf4', 'Bf5', 'Qd2', 'Qd6']
+    const r = applyMove(historial, { from: 'e1', to: 'c1' })
+    expect(r).not.toBeNull()
+    expect(r!.san).toBe('O-O-O')
+  })
+
+  it('permite la captura al paso (e5->d6) y la registra como exd6', () => {
+    // Blancas avanzan e4-e5; negras responden d7-d5 a su lado, habilitando
+    // la captura al paso sobre el peón que acaba de pasar por d6.
+    const historial = ['e4', 'a6', 'e5', 'd5']
+    const r = applyMove(historial, { from: 'e5', to: 'd6' })
+    expect(r).not.toBeNull()
+    expect(r!.san).toBe('exd6')
+  })
 })
 
 describe('outcomeOf', () => {
@@ -86,5 +109,35 @@ describe('outcomeOf', () => {
     expect(r.over).toBe(true)
     expect(r.result).toBe('1/2-1/2')
     expect(r.reason).toBe('threefold')
+  })
+
+  it('detecta tablas por la regla de las cincuenta jugadas', () => {
+    // Desarrolla y castiga ambos lados (última jugada de peón: 'd5'), y
+    // después arrastra piezas mayores y menores de un lado a otro sin
+    // capturar ni volver a mover un peón, evitando a propósito la
+    // repetición triple (cada posición aparece a lo sumo dos veces) hasta
+    // completar 100 medias jugadas sin avance: exactamente la condición de
+    // la regla de las cincuenta jugadas, generado y verificado con chess.js
+    // directamente (`isDrawByFiftyMoves()`) antes de fijarlo acá.
+    const desarrollo = [
+      'Nf3', 'Nf6', 'g3', 'g6', 'Bg2', 'Bg7', 'O-O', 'O-O',
+      'd4', 'd5', 'Nc3', 'Nc6', 'Bf4', 'Bf5',
+    ]
+    const arrastre = [
+      'Be5', 'Rb8', 'Bd6', 'Rc8', 'Be5', 'Ra8', 'Bd6', 'Rb8', 'Be5', 'Rc8',
+      'Bd6', 'Ra8', 'Bf4', 'Rb8', 'Bg5', 'Rc8', 'Bh6', 'Rb8', 'Bf4', 'Rc8',
+      'Bg5', 'Rb8', 'Bh6', 'Rc8', 'Bf4', 'Qe8', 'Be5', 'Rd8', 'Bd6', 'Rd7',
+      'Be5', 'Qd8', 'Bd6', 'Qc8', 'Be5', 'Qe8', 'Bd6', 'Qd8', 'Be5', 'Qc8',
+      'Bd6', 'Qb8', 'Be5', 'Qa8', 'Bd6', 'Re8', 'Be5', 'Qb8', 'Bd6', 'Qc8',
+      'Be5', 'Qd8', 'Bd6', 'Qb8', 'Be5', 'Qc8', 'Bd6', 'Qd8', 'Be5', 'Qa8',
+      'Bd6', 'Rf8', 'Be5', 'Qb8', 'Bd6', 'Rfd8', 'Be5', 'Qc8', 'Bd6', 'Qa8',
+      'Be5', 'Qb8', 'Bd6', 'Qc8', 'Be5', 'Qa8', 'Bd6', 'Rc8', 'Be5', 'Qb8',
+      'Bd6', 'Kh8', 'Be5', 'Qa8', 'Bd6', 'Rcd8', 'Be5', 'Qb8', 'Bd6', 'Qc8',
+      'Be5', 'Qa8', 'Bd6', 'Qb8', 'Be5', 'Qc8',
+    ]
+    const r = outcomeOf([...desarrollo, ...arrastre])
+    expect(r.over).toBe(true)
+    expect(r.result).toBe('1/2-1/2')
+    expect(r.reason).toBe('fifty_move')
   })
 })
