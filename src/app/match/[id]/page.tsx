@@ -43,6 +43,17 @@ function esRechazoDelJugador(codigo: string): boolean {
   return codigo in MENSAJES_DE_ERROR && !CODIGOS_NO_CULPABILIZANTES.has(codigo)
 }
 
+// `unirse()` distingue un asiento perdido (la ruta /join ya colapsa su
+// propio 'conflict' interno a 'full': ver join/route.ts) de un fallo de red
+// genuino: cualquier código no reconocido no puede ser una respuesta real
+// del servidor, así que probablemente ni siquiera llegó — el mensaje no
+// debe sugerir que el asiento se perdió cuando puede seguir libre.
+function mensajeDeUnirse(codigo: string): string {
+  if (codigo === 'full') return 'Alguien más ocupó el asiento. Quedás como espectador.'
+  if (codigo in MENSAJES_DE_ERROR) return mensajeDeError(codigo)
+  return 'No se pudo unir por un problema de conexión. Probá de nuevo.'
+}
+
 export default function MatchPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params)
   const { match, errorSincronizacion, errorJugada, mover, refrescar } = useMatch(id)
@@ -58,13 +69,28 @@ export default function MatchPage({ params }: { params: Promise<{ id: string }> 
     typeof window === 'undefined' ? '' : loadAccessKey()
   ))
   const [copiado, setCopiado] = useState(false)
+  const [uniendose, setUniendose] = useState(false)
+  const [errorUnirse, setErrorUnirse] = useState<string | null>(null)
 
   async function unirse() {
-    saveAccessKey(clave)
-    const r = await apiJoin(id, clave)
-    saveCreds(id, { token: r.token, color: r.color })
-    setColor(r.color)
-    await refrescar()
+    setUniendose(true)
+    setErrorUnirse(null)
+    try {
+      saveAccessKey(clave)
+      const r = await apiJoin(id, clave)
+      saveCreds(id, { token: r.token, color: r.color })
+      setColor(r.color)
+      await refrescar()
+    } catch (e) {
+      setErrorUnirse(e instanceof Error ? e.message : 'error')
+      // Si perdimos la carrera (full) el servidor ya tiene el asiento
+      // ocupado: se refresca para que `puedeUnirse` pase a false de
+      // inmediato, en vez de esperar hasta 4s al próximo sondeo y dejar el
+      // botón ofreciéndose sobre un asiento que ya no está disponible.
+      void refrescar()
+    } finally {
+      setUniendose(false)
+    }
   }
 
   if (!match && !errorSincronizacion) {
@@ -129,14 +155,23 @@ export default function MatchPage({ params }: { params: Promise<{ id: string }> 
             </button>
           </>
         )}
-        {puedeUnirse && <button onClick={() => { void unirse() }}>Unirme como negras</button>}
+        {puedeUnirse && (
+          <button onClick={() => { void unirse() }} disabled={uniendose}>
+            {uniendose ? 'Uniendo…' : 'Unirme como negras'}
+          </button>
+        )}
+        {errorUnirse && (
+          <p style={{ color: errorUnirse === 'full' ? 'var(--muted-foreground)' : 'crimson' }}>
+            {mensajeDeUnirse(errorUnirse)}
+          </p>
+        )}
         {match.status === 'active' && (
           <p>{esMiTurno ? 'Te toca.' : 'Turno del rival…'}</p>
         )}
         {match.status === 'finished' && (
           <p>Partida terminada: {match.result} ({match.reason})</p>
         )}
-        {esEspectador && !puedeUnirse && <p>Estás mirando como espectador.</p>}
+        {esEspectador && !puedeUnirse && !errorUnirse && <p>Estás mirando como espectador.</p>}
         {/* Rechazo de jugada y aviso de sincronización son canales separados
             (ver useMatch): el segundo nunca pisa al primero, y el rechazo
             queda visible hasta el próximo intento en vez de desaparecer
