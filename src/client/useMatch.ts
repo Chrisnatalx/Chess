@@ -9,6 +9,16 @@ const INTERVALO_RELAJADO = 15_000
 const UMBRAL_RELAJACION = 120_000
 /** Tope del backoff cuando el servidor encadena fallos: no se espera más de esto. */
 const TECHO_BACKOFF = 60_000
+/**
+ * Una partida en 'waiting' sin cambios durante esto es, con toda
+ * probabilidad, una pestaña abandonada (a nadie que sigue mirando la
+ * pantalla le importa esperar 15 minutos sin recargar). Cada pestaña
+ * olvidada en 'waiting' consulta para siempre — 4s los primeros dos
+ * minutos, 15s después — unos 5.760 comandos de Redis por día, contra las
+ * 500.000/mes del free tier de Upstash. Dejar de consultar acá es lo que
+ * más probablemente le ahorra plata al dueño.
+ */
+const UMBRAL_ABANDONO_ESPERA = 15 * 60_000
 
 export type PollContext = {
   status: PublicMatch['status']
@@ -41,6 +51,10 @@ export function useMatch(id: string) {
   // siguiente sondeo exitoso limpiaba el mismo estado que usaba la jugada.
   const [errorSincronizacion, setErrorSincronizacion] = useState<string | null>(null)
   const [errorJugada, setErrorJugada] = useState<string | null>(null)
+  // true cuando se dejó de consultar una partida en 'waiting' abandonada
+  // (ver UMBRAL_ABANDONO_ESPERA): la UI debe explicar por qué el tablero
+  // dejó de actualizarse en vez de parecer roto en silencio.
+  const [esperaAbandonada, setEsperaAbandonada] = useState(false)
 
   // Espejo de `match` en un ref: así refrescar/mover/tick leen el estado más
   // reciente sin necesitar `match` en su lista de dependencias, lo que evita
@@ -114,15 +128,24 @@ export function useMatch(id: string) {
         esMiTurno,
         visible: typeof document === 'undefined' || document.visibilityState === 'visible',
       }
+      const msDesdeUltimoCambio =
+        ultimoCambio.current === null ? 0 : Date.now() - ultimoCambio.current
+      // Se resuelve por fuera de shouldPoll (no se toca su firma ni su
+      // política: sus 7 tests unitarios la fijan) para no arriesgar el resto
+      // de sus casos — esta es una condición aparte, aplicada después.
+      const abandonada = ctx.status === 'waiting' && msDesdeUltimoCambio > UMBRAL_ABANDONO_ESPERA
+      setEsperaAbandonada(abandonada)
+
       // Sin partida todavía (primer montaje, o el intento anterior falló), o
       // con fallos pendientes de confirmar (un poll o un /move recientes no
       // llegaron a buen puerto): se consulta igual, sin esperar a que
       // shouldPoll lo autorice. Si no, un cliente que cree —con datos
       // locales nunca actualizados— que es su turno se queda sin consultar
       // para siempre: `shouldPoll` da `false` con `esMiTurno: true` sin
-      // importar cuánto haya fallado la sincronización.
+      // importar cuánto haya fallado la sincronización. `abandonada` manda
+      // por encima de todo lo demás: nadie sigue mirando esta pestaña.
       const necesitaConsultar =
-        actual === null || fallosConsecutivos.current > 0 || shouldPoll(ctx)
+        !abandonada && (actual === null || fallosConsecutivos.current > 0 || shouldPoll(ctx))
 
       try {
         if (necesitaConsultar) await refrescar()
@@ -201,7 +224,7 @@ export function useMatch(id: string) {
     [id, refrescar],
   )
 
-  return { match, errorSincronizacion, errorJugada, mover, refrescar }
+  return { match, errorSincronizacion, errorJugada, mover, refrescar, esperaAbandonada }
 }
 
 /** El turno se deriva del ply: par = blancas, impar = negras. */

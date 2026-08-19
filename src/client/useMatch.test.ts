@@ -217,4 +217,28 @@ describe('useMatch (regresión, con estado)', () => {
       expect(get.mock.calls.length).toBeGreaterThan(llamadasTrasElFallo)
     },
   )
+
+  it(
+    'MENOR 6: deja de consultar una partida en waiting abandonada, y lo expone en esperaAbandonada',
+    async () => {
+      vi.useFakeTimers()
+      const get = vi.mocked(api.apiGet)
+      get.mockResolvedValue({ match: partida(0, 1, 'waiting') })
+
+      const { result } = renderHook(() => useMatch('m1'))
+      await vi.waitFor(() => expect(get).toHaveBeenCalledTimes(1))
+      expect(result.current.esperaAbandonada).toBe(false)
+
+      // Cruza el umbral de 15 minutos sin ningún cambio en la partida (sigue
+      // 'waiting', mismo ply): una pestaña abandonada, no alguien mirando.
+      await vi.advanceTimersByTimeAsync(16 * 60_000)
+      expect(result.current.esperaAbandonada).toBe(true)
+
+      const llamadasTrasElUmbral = get.mock.calls.length
+      await vi.advanceTimersByTimeAsync(5 * 60_000)
+      // Ninguna llamada más: dejar de consultar es justamente el punto (le
+      // ahorra cuota de Redis al dueño).
+      expect(get.mock.calls.length).toBe(llamadasTrasElUmbral)
+    },
+  )
 })

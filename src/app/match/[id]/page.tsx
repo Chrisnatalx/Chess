@@ -56,7 +56,7 @@ function mensajeDeUnirse(codigo: string): string {
 
 export default function MatchPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params)
-  const { match, errorSincronizacion, errorJugada, mover, refrescar } = useMatch(id)
+  const { match, errorSincronizacion, errorJugada, mover, refrescar, esperaAbandonada } = useMatch(id)
   // Estado derivado de localStorage al montar (`loadCreds` es un sistema
   // externo a React, no algo que sincronizar con un efecto): salvo eso,
   // solo cambia cuando `unirse` lo asigna directamente tras unirse.
@@ -153,6 +153,12 @@ export default function MatchPage({ params }: { params: Promise<{ id: string }> 
             >
               {copiado ? 'Copiado' : 'Copiar link de invitación'}
             </button>
+            {esperaAbandonada && (
+              <p style={{ color: 'var(--muted-foreground)' }}>
+                Dejamos de consultar porque pasaron más de 15 minutos sin
+                novedades. Si seguís esperando al rival, recargá la página.
+              </p>
+            )}
           </>
         )}
         {puedeUnirse && (
