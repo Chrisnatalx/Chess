@@ -9,6 +9,7 @@ const hayCredenciales =
 function partida(id: string): MatchState {
   return {
     id,
+    schema: 1,
     history: ['e4', 'e5'],
     fen: 'rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2',
     ply: 2,
@@ -174,5 +175,20 @@ describe('RedisStore (unidad, sin credenciales)', () => {
     const store = new RedisStore(cliente)
 
     expect(await store.putIfVersion(partida('unit-no'), 0)).toBe(false)
+  })
+
+  it('get() devuelve null (no un estado corrupto) para un registro sin el campo schema esperado', async () => {
+    // Simula un registro escrito por una versión anterior del esquema (o
+    // cualquier futuro incompatible): el cliente de Upstash deserializa el
+    // JSON igual, pero sin `schema === SCHEMA_VERSION` no hay que confiar en
+    // los demás campos.
+    const sinSchema = Object.fromEntries(
+      Object.entries(partida('sin-schema')).filter(([clave]) => clave !== 'schema'),
+    )
+    const { cliente, get } = crearClienteFalso()
+    get.mockResolvedValue(sinSchema)
+    const store = new RedisStore(cliente)
+
+    expect(await store.get('sin-schema')).toBeNull()
   })
 })

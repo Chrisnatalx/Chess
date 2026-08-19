@@ -1,4 +1,5 @@
 import { applyMove, fenOf, turnOf, outcomeOf } from '@/core/game'
+import { SCHEMA_VERSION } from '@/core/match-state'
 import type { Color, MatchState } from '@/core/match-state'
 import type { MatchStore } from './store/types'
 
@@ -33,6 +34,7 @@ export async function createMatch(store: MatchStore, deps: Deps): Promise<Create
   const token = deps.newToken()
   const state: MatchState = {
     id: deps.newId(),
+    schema: SCHEMA_VERSION,
     history: [],
     fen: fenOf([]),
     ply: 0,

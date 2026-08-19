@@ -14,8 +14,21 @@ export type PlayerSlot = { kind: PlayerKind; token: string | null; label: string
 
 export type MatchStatus = 'waiting' | 'active' | 'finished'
 
+/**
+ * Versión del esquema de `MatchState` tal como se persiste. Las partidas
+ * viven hasta 7 días en el almacén (ver TTL_SEGUNDOS en store/redis.ts), así
+ * que un cambio de esquema en un hito futuro puede quedar a caballo de un
+ * despliegue: un registro viejo se deserializaría con campos `undefined`
+ * que llegan a aritmética/comparaciones que esperan otra cosa. Los almacenes
+ * comparan este campo en `get()` y devuelven `null` si no coincide, en vez
+ * de arriesgarse a corromper una partida viva.
+ */
+export const SCHEMA_VERSION = 1
+
 export type MatchState = {
   id: string
+  /** Ver SCHEMA_VERSION arriba. */
+  schema: number
   /** Jugadas en SAN. Fuente de verdad de la partida. */
   history: string[]
   /** Desnormalizado desde `history` para comodidad del cliente. */

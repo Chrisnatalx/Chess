@@ -1,3 +1,4 @@
+import { SCHEMA_VERSION } from '@/core/match-state'
 import type { MatchState } from '@/core/match-state'
 import type { MatchStore } from './types'
 
@@ -10,7 +11,13 @@ export class MemoryStore implements MatchStore {
 
   async get(id: string): Promise<MatchState | null> {
     const crudo = this.partidas.get(id)
-    return crudo ? (JSON.parse(crudo) as MatchState) : null
+    if (!crudo) return null
+    const estado = JSON.parse(crudo) as MatchState
+    // Un registro de un esquema distinto (falta el campo, o no es el
+    // esperado) no es de fiar: se trata como si no existiera en vez de
+    // arriesgarse a corromper una partida viva con campos `undefined`.
+    // Ver el comentario de SCHEMA_VERSION en @/core/match-state.
+    return estado.schema === SCHEMA_VERSION ? estado : null
   }
 
   async put(state: MatchState): Promise<void> {

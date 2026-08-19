@@ -1,4 +1,5 @@
 import { Redis } from '@upstash/redis'
+import { SCHEMA_VERSION } from '@/core/match-state'
 import type { MatchState } from '@/core/match-state'
 import type { MatchStore } from './types'
 
@@ -59,7 +60,12 @@ export class RedisStore implements MatchStore {
   async get(id: string): Promise<MatchState | null> {
     // El cliente de Upstash deserializa JSON automáticamente al leer.
     const valor = await this.redis.get<MatchState>(this.clave(id))
-    return valor ?? null
+    if (!valor) return null
+    // Un registro de un esquema distinto (falta el campo, o no es el
+    // esperado) no es de fiar: se trata como si no existiera en vez de
+    // arriesgarse a corromper una partida viva con campos `undefined`.
+    // Ver el comentario de SCHEMA_VERSION en @/core/match-state.
+    return valor.schema === SCHEMA_VERSION ? valor : null
   }
 
   async put(state: MatchState): Promise<void> {

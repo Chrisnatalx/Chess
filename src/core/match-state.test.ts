@@ -5,6 +5,7 @@ import type { MatchState } from './match-state'
 function estadoConTokens(): MatchState {
   return {
     id: 'partida-1',
+    schema: 1,
     history: [],
     fen: 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1',
     ply: 0,

@@ -63,6 +63,7 @@ function partida(
 ): PublicMatch {
   return {
     id: 'm1',
+    schema: 1,
     history: [],
     fen: 'fen-de-prueba',
     ply,

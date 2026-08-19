@@ -5,6 +5,7 @@ import type { MatchState } from '@/core/match-state'
 function partida(id: string): MatchState {
   return {
     id,
+    schema: 1,
     history: [],
     fen: 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1',
     ply: 0,
@@ -65,5 +66,20 @@ describe('MemoryStore', () => {
     const guardada = await store.get('a')
     expect(guardada!.ply).toBe(0)
     expect(guardada!.version).toBe(0)
+  })
+
+  it('get() devuelve null (no un estado corrupto) para un registro sin el campo schema esperado', async () => {
+    // Simula lo que hay hoy guardado en producción, escrito antes de que
+    // existiera este campo, o cualquier registro futuro de un esquema
+    // incompatible: sin este chequeo, un campo nuevo del próximo hito
+    // llegaría `undefined` a aritmética/comparaciones que esperan otra cosa
+    // en vez de degradar a "no encontramos esa partida", que ya está bien
+    // resuelto en la UI.
+    const store = new MemoryStore()
+    const sinSchema = Object.fromEntries(
+      Object.entries(partida('vieja')).filter(([clave]) => clave !== 'schema'),
+    ) as unknown as MatchState
+    await store.put(sinSchema)
+    expect(await store.get('vieja')).toBeNull()
   })
 })
