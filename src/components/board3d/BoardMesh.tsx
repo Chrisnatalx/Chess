@@ -48,11 +48,13 @@ type SquareProps = {
   square: string
   dark: boolean
   isSelected: boolean
+  isHovered: boolean
   isLegalDestination: boolean
   onClick: (square: string) => void
+  onHover: (square: string) => void
 }
 
-function Square({ square, dark, isSelected, isLegalDestination, onClick }: SquareProps) {
+function Square({ square, dark, isSelected, isHovered, isLegalDestination, onClick, onHover }: SquareProps) {
   const [x, z] = squareToPosition(square)
   const color = dark ? '#5c3d28' : '#e3cda3'
 
@@ -65,6 +67,9 @@ function Square({ square, dark, isSelected, isLegalDestination, onClick }: Squar
           e.stopPropagation()
           onClick(square)
         }}
+        // Sin stopPropagation: el `HoverSink` de Scene.tsx tiene que recibir
+        // este mismo pointermove después, para cerrar la lectura del hover.
+        onPointerMove={() => onHover(square)}
       >
         <boxGeometry args={[1, 0.06, 1]} />
         <meshStandardMaterial color={color} roughness={0.75} metalness={0.02} />
@@ -81,18 +86,31 @@ function Square({ square, dark, isSelected, isLegalDestination, onClick }: Squar
           <meshBasicMaterial color="#4caf50" transparent opacity={0.75} />
         </mesh>
       )}
+      {/* Resalte de hover: anillo ámbar pegado al borde de la casilla. Dice,
+          antes del clic, sobre qué casilla va a actuar ese clic. Va cerca
+          del borde a propósito — el radio interno (0.4) queda por fuera de
+          la base más ancha de cualquier pieza (0.38), así que se ve aunque
+          la casilla resaltada tenga una pieza encima. */}
+      {isHovered && (
+        <mesh position={[0, 0.04, 0]} rotation={[-Math.PI / 2, 0, 0]}>
+          <ringGeometry args={[0.4, 0.47, 40]} />
+          <meshBasicMaterial color="#f2a33c" transparent opacity={0.9} />
+        </mesh>
+      )}
     </group>
   )
 }
 
 type Props = {
   selected: string | null
+  hovered: string | null
   legalDestinations: string[]
   onSquareClick: (square: string) => void
+  onSquareHover: (square: string) => void
 }
 
 /** Tablero: 64 casillas clickeables + marco + etiquetas de coordenadas. */
-export function BoardMesh({ selected, legalDestinations, onSquareClick }: Props) {
+export function BoardMesh({ selected, hovered, legalDestinations, onSquareClick, onSquareHover }: Props) {
   const squares = useMemo(() => {
     const list: { square: string; dark: boolean }[] = []
     for (let r = 0; r < 8; r++) {
@@ -123,8 +141,10 @@ export function BoardMesh({ selected, legalDestinations, onSquareClick }: Props)
           square={square}
           dark={dark}
           isSelected={selected === square}
+          isHovered={hovered === square}
           isLegalDestination={legalSet.has(square)}
           onClick={onSquareClick}
+          onHover={onSquareHover}
         />
       ))}
 

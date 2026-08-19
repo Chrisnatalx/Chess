@@ -5,122 +5,129 @@ import dynamic from 'next/dynamic'
 import { Chess } from 'chess.js'
 import { decidirJugada } from '../decidirJugada'
 import type { BoardProps } from '../boardContract'
-import { destinosLegales } from './seleccion'
-import type { ScenePiece, SquareHit } from './Scene'
+import { destinosLegales, resolveSquare, type SquareHit } from './seleccion'
+import type { ScenePiece } from './Scene'
 
 // La escena usa @react-three/fiber (WebGL, `document`, etc.), así que no
 // puede pre-renderizarse en el servidor.
 const Scene = dynamic(() => import('./Scene'), { ssr: false })
 
 /**
- * Qué casilla usar de un clic que puede traer dos candidatas: la pieza
- * que el rayo atravesó más cerca de cámara (si alguna) y la casilla real
- * de `BoardMesh` que el mismo rayo también tocó (ver `SquareHit` en
- * `Scene.tsx`).
- *
- * Preferir siempre la pieza reintroduciría el bug original (una pieza
- * alta delante tapa la de atrás). Preferir siempre la casilla
- * reintroduce dos bugs distintos, medidos a mano con Playwright:
- * - clic en la mitad de arriba de una pieza ya seleccionada
- *   parafrasea a la casilla de la fila siguiente (más lejos de cámara)
- *   en vez de a la propia, así que "deseleccionar tocando la pieza
- *   elegida" termina jugando una jugada;
- * - lo mismo al seleccionar: tocar la corona del rey selecciona el peón
- *   de adelante en vez del rey.
- *
- * La regla que evita ambos sin resucitar el original: la pieza gana
- * sólo cuando
- *   (a) no hay nada elegido todavía y esa pieza tiene alguna jugada
- *       legal, o
- *   (b) la pieza tocada es la que ya está elegida (deseleccionar).
- * En cualquier otro caso gana la casilla. El caso d2/e2 original sigue
- * arreglado porque la dama y el rey no tienen ninguna jugada legal en la
- * posición inicial: (a) no se cumple, y el clic cae en la casilla real.
- */
-function resolveSquare({ pieceSquare, square }: SquareHit, selected: string | null, history: string[]): string {
-  if (pieceSquare !== null) {
-    const piecePreferida =
-      (selected === null && destinosLegales(history, pieceSquare).length > 0) || pieceSquare === selected
-    if (piecePreferida) return pieceSquare
-  }
-  return square
-}
-
-/**
  * Tablero 3D: cumple el mismo `BoardProps` que Board2D. La geometría y el
- * raycasting por capas viven en Scene/BoardMesh/Piece; acá vive la
- * máquina de estados de la selección (qué casilla eligió el jugador) y la
- * validación optimista de la jugada, compartida con el tablero 2D vía
- * `decidirJugada`.
+ * raycasting viven en Scene/BoardMesh/Piece; acá vive la máquina de estados
+ * de la selección (qué casilla eligió el jugador, qué casilla resolvería el
+ * puntero ahora mismo) y la validación optimista de la jugada, compartida
+ * con el tablero 2D vía `decidirJugada`.
+ *
+ * La ambigüedad "¿pieza o casilla?" se ataca en tres lugares a la vez:
+ * - la cámara está lo bastante alta como para que ninguna pieza de la fila
+ *   de atrás tape el centro de la casilla de adelante (ver `Scene.tsx`);
+ * - `resolveSquare` decide desde la pieza elegida, no desde la tocada (ver
+ *   `seleccion.ts`);
+ * - el hover resalta, antes de hacer clic, exactamente la casilla sobre la
+ *   que el clic va a actuar — misma función, mismo dato de entrada.
  */
 export function Board3D({ fen, history, orientation, puedeMover, onMove }: BoardProps) {
-  // La selección se guarda junto con el `history` para el que es válida.
-  // Si `history` cambia (se jugó una jugada, se reinició la partida, se
-  // entró a una revancha en el mismo componente montado) y la selección
-  // quedó de un `history` anterior, se lee como "nada elegido" en este
-  // render — sin useEffect: es un valor derivable de las props actuales,
-  // no un estado que necesite sincronizarse con un efecto secundario.
-  const [selection, setSelection] = useState<{ forHistory: string[]; square: string } | null>(null)
-  const selected = puedeMover && selection !== null && selection.forHistory === history ? selection.square : null
+  // La selección se guarda junto con la partida para la que es válida.
+  // Se compara por VALOR (el SAN concatenado), no por identidad del array:
+  // el sondeo de `useMatch` construye un `history` nuevo en cada respuesta
+  // aunque el contenido sea idéntico, y con igualdad por referencia eso
+  // borraba la selección en medio del turno sin ninguna razón de juego.
+  // Si la partida sí avanzó (o se reinició), la clave cambia y la selección
+  // vieja se lee como "nada elegido" en este render — sin useEffect: es un
+  // valor derivable de las props actuales.
+  const [selection, setSelection] = useState<{ forHistory: string; square: string } | null>(null)
+  const [hoverHit, setHoverHit] = useState<SquareHit | null>(null)
 
-  const pieces = useMemo<ScenePiece[]>(() => {
+  const historyKey = useMemo(() => history.join(' '), [history])
+  const selected =
+    puedeMover && selection !== null && selection.forHistory === historyKey ? selection.square : null
+
+  const { pieces, turno } = useMemo(() => {
     const chess = new Chess(fen)
-    const resultado: ScenePiece[] = []
+    const lista: ScenePiece[] = []
     for (const fila of chess.board()) {
       for (const casilla of fila) {
-        if (casilla) resultado.push({ square: casilla.square, type: casilla.type, color: casilla.color })
+        if (casilla) lista.push({ square: casilla.square, type: casilla.type, color: casilla.color })
       }
     }
-    return resultado
+    return { pieces: lista, turno: chess.turn() }
   }, [fen])
+
+  // Casillas donde hay una pieza de quien tiene el turno. Cualquiera de
+  // ellas se puede elegir, tenga o no jugadas disponibles: elegir un rey
+  // ahogado y ver que no se ilumina ningún destino es información honesta;
+  // que el clic no haga nada parece que el tablero se colgó.
+  const propias = useMemo(
+    () => new Set(pieces.filter((p) => p.color === turno).map((p) => p.square)),
+    [pieces, turno],
+  )
 
   const legalDestinations = useMemo(
     () => (selected ? destinosLegales(history, selected) : []),
     [history, selected],
   )
 
+  const hovered =
+    puedeMover && hoverHit !== null ? resolveSquare(hoverHit, selected, legalDestinations) : null
+
+  const handleSquareHover = useCallback((hit: SquareHit | null) => {
+    // Se descarta el hit nuevo si describe lo mismo que el anterior: un
+    // pointermove dispara decenas de veces por segundo y sin esto cada uno
+    // provocaría un render.
+    setHoverHit((prev) => {
+      if (prev === null && hit === null) return prev
+      if (prev !== null && hit !== null && prev.pieceSquare === hit.pieceSquare && prev.square === hit.square) {
+        return prev
+      }
+      return hit
+    })
+  }, [])
+
   const handleSquareClick = useCallback(
     (hit: SquareHit) => {
       if (!puedeMover) return
 
-      const square = resolveSquare(hit, selected, history)
+      const square = resolveSquare(hit, selected, legalDestinations)
 
-      if (selected === null) {
-        // Nada elegido: sólo selecciona si la casilla tiene alguna jugada
-        // legal (pieza propia, de quien tiene el turno, con movimientos).
-        if (destinosLegales(history, square).length > 0) setSelection({ forHistory: history, square })
-        return
+      if (selected !== null) {
+        if (square === selected) {
+          setSelection(null)
+          return
+        }
+        if (legalDestinations.includes(square)) {
+          const jugada = decidirJugada(history, selected, square)
+          setSelection(null)
+          // decidirJugada ya reintentó con coronación a dama; null significa
+          // realmente ilegal, y ahí no se llama a onMove.
+          if (jugada) onMove(jugada.from, jugada.to, jugada.promotion)
+          return
+        }
       }
 
-      if (square === selected) {
-        setSelection(null)
-        return
-      }
-
-      if (legalDestinations.includes(square)) {
-        const jugada = decidirJugada(history, selected, square)
-        setSelection(null)
-        // decidirJugada ya reintentó con coronación a dama; null significa
-        // realmente ilegal, y ahí no se llama a onMove.
-        if (jugada) onMove(jugada.from, jugada.to, jugada.promotion)
-        return
-      }
-
-      // Clic en otra casilla mientras había una selección: si tiene
-      // jugadas propias, la selección salta ahí; si no, se cancela.
-      setSelection(destinosLegales(history, square).length > 0 ? { forHistory: history, square } : null)
+      // Ni deselección ni jugada: la casilla pasa a ser la nueva selección si
+      // tiene una pieza de quien mueve, y si no, cancela lo que hubiera.
+      setSelection(propias.has(square) ? { forHistory: historyKey, square } : null)
     },
-    [puedeMover, selected, history, legalDestinations, onMove],
+    [puedeMover, selected, legalDestinations, history, historyKey, propias, onMove],
   )
 
+  // El cursor de mano se decide acá, no en cada pieza: lo que importa es si
+  // el clic va a hacer algo, y eso depende de la casilla resuelta (que puede
+  // no ser la pieza que está debajo del puntero).
+  const accionable =
+    hovered !== null && (hovered === selected || legalDestinations.includes(hovered) || propias.has(hovered))
+
   return (
-    <div style={{ width: '100%', height: '100%' }}>
+    <div style={{ width: '100%', height: '100%', cursor: accionable ? 'pointer' : 'default' }}>
       <Scene
         pieces={pieces}
         selected={selected}
+        hovered={hovered}
         legalDestinations={legalDestinations}
         orientation={orientation}
         onSquareClick={handleSquareClick}
+        onSquareHover={handleSquareHover}
       />
     </div>
   )

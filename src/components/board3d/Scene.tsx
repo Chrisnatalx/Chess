@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef } from 'react'
 import { Canvas, useThree } from '@react-three/fiber'
 import { OrbitControls, PerspectiveCamera } from '@react-three/drei'
 import type { OrbitControls as OrbitControlsImpl } from 'three-stdlib'
-import type { PerspectiveCamera as ThreePerspectiveCamera } from 'three'
+import { BackSide, type PerspectiveCamera as ThreePerspectiveCamera } from 'three'
 // Import solo de tipos: activa la extensión de JSX.IntrinsicElements que
 // @react-three/fiber declara sobre 'react' (<mesh>, <group>, etc.). Ver la
 // nota equivalente en Piece.tsx / BoardMesh.tsx.
@@ -12,29 +12,40 @@ import type {} from '@react-three/fiber'
 import { BoardMesh, squareToPosition } from './BoardMesh'
 import { Piece } from './Piece'
 import type { PieceKind } from './pieceGeometry'
+import type { SquareHit } from './seleccion'
 import type { Color } from '@/core/match-state'
 
 export type ScenePiece = { square: string; type: PieceKind; color: Color }
 
-/**
- * Lo que reporta un clic sobre el tablero: la casilla real que tocó el
- * rayo (siempre una de las 64 de `BoardMesh`, nunca el marco — ver
- * `SceneContents`) y, si el rayo también atravesó una pieza en el
- * camino, cuál. `Board3D` decide con esto cuál de las dos manda (ver el
- * comentario largo más abajo, en `SceneContents`).
- */
-export type SquareHit = { pieceSquare: string | null; square: string }
-
 type Props = {
   pieces: ScenePiece[]
   selected: string | null
+  hovered: string | null
   legalDestinations: string[]
   orientation: Color
   onSquareClick: (hit: SquareHit) => void
+  onSquareHover: (hit: SquareHit | null) => void
 }
 
-const CAM_WHITE: [number, number, number] = [0, 9.8, 11.6]
-const CAM_BLACK: [number, number, number] = [0, 9.8, -11.6]
+/**
+ * Posición de cámara: elevación ~55° sobre el plano del tablero, a 15.15
+ * unidades del centro (una casilla = 1 unidad).
+ *
+ * La altura no es estética. Con la cámara original — (0, 9.8, 11.6), unos
+ * 40° — la silueta de la dama y la del rey se estiran sobre la casilla de
+ * adelante hasta z=2.39 y z=2.43, y el centro de d2/e2 está en z=2.50: el
+ * rayo de un clic apuntado al centro de esas casillas atravesaba primero la
+ * pieza de atrás. Es la causa raíz de toda la ambigüedad "¿pieza o
+ * casilla?"; medido con la geometría real (LatheGeometry + remates) y un
+ * raycaster de three, no estimado.
+ *
+ * A 55° las mismas siluetas llegan sólo hasta z=2.77 (dama) y z=2.86 (rey):
+ * ninguna pieza de la fila 1 tapa ya el centro de ninguna casilla de la fila
+ * 2, con un margen de ~0.27 casillas en el peor caso. Sigue siendo una
+ * vista claramente en perspectiva (90° sería cenital y aplanaría la escena).
+ */
+const CAM_WHITE: [number, number, number] = [0, 12.4, 8.7]
+const CAM_BLACK: [number, number, number] = [0, 12.4, -8.7]
 const DRAG_THRESHOLD_PX = 5
 
 /**
@@ -124,46 +135,99 @@ function useWasDrag(): () => boolean {
   return useCallback(() => draggedRef.current, [])
 }
 
+/**
+ * Esfera enorme, invisible y vuelta del revés (`BackSide`) alrededor de toda
+ * la escena. No se ve ni se puede clickear (no tiene `onClick`); su único
+ * trabajo es ser SIEMPRE el último objeto que el rayo de un `pointermove`
+ * atraviesa, esté el puntero sobre una pieza, sobre una casilla, sobre el
+ * marco o sobre el fondo vacío.
+ *
+ * Eso la convierte en el punto donde se cierra la lectura del hover: para
+ * cuando le toca a ella, la pieza y la casilla que el mismo movimiento tocó
+ * ya quedaron anotadas, así que puede reportar el par completo — o `null` si
+ * el puntero no está sobre ninguna casilla, que es exactamente cuando un
+ * clic ahí tampoco haría nada.
+ */
+function HoverSink({ onSettle }: { onSettle: () => void }) {
+  return (
+    <mesh onPointerMove={onSettle}>
+      <sphereGeometry args={[40, 16, 12]} />
+      <meshBasicMaterial side={BackSide} transparent opacity={0} depthWrite={false} />
+    </mesh>
+  )
+}
+
 type ContentsProps = Omit<Props, 'orientation'>
 
 /**
  * El punto crítico de esta tarea.
  *
- * Las piezas SÍ escuchan `onClick` (a diferencia de una versión anterior
- * de este archivo), pero nunca detienen la propagación: sólo anotan, en
- * `pieceHitRef`, cuál fue la pieza más cercana a cámara que el rayo
- * atravesó. Quien decide la casilla final del clic es siempre la casilla
- * de 64 de `BoardMesh` que el mismo rayo también toca (BoardMesh está
- * por debajo de toda pieza en `y`, así que su `onClick` dispara después,
- * con la casilla real — no una calculada — sin que importe qué pieza
- * haya en el medio del camino visual). `Board3D` recibe ambos datos
- * (`{ pieceSquare, square }`) y decide cuál usar: ver el comentario en
- * `Board3D.tsx` para la regla exacta y por qué no alcanza con "la pieza
- * siempre gana" ni con "el plano siempre gana".
+ * Las piezas SÍ escuchan `onClick` y `onPointerMove`, pero nunca detienen la
+ * propagación: sólo anotan cuál fue la pieza más cercana a cámara que el
+ * rayo atravesó. Quien aporta la otra mitad del dato es siempre la casilla
+ * de las 64 de `BoardMesh` que el mismo rayo también toca (BoardMesh está
+ * por debajo de toda pieza en `y`, así que sus handlers corren después, con
+ * la casilla real — no una calculada — sin que importe qué pieza haya en el
+ * medio del camino visual). `Board3D` recibe las dos y decide con
+ * `resolveSquare`; el mismo par alimenta el clic y el resalte de hover, así
+ * que lo que se ilumina antes de hacer clic es literalmente sobre lo que el
+ * clic va a actuar.
  *
- * Como ninguna pieza detiene la propagación y el marco de madera no
- * tiene ningún handler de clic, un clic fuera de las 64 casillas
- * (sobre el marco, o más allá) no dispara nada — ni `onSquareClick` ni
- * ningún otro efecto — sin necesidad de recortar ni descartar nada a
- * mano.
+ * Como ninguna pieza detiene la propagación y el marco de madera no tiene
+ * ningún handler de clic, un clic fuera de las 64 casillas (sobre el marco,
+ * o más allá) no dispara nada — ni `onSquareClick` ni ningún otro efecto —
+ * sin necesidad de recortar ni descartar nada a mano.
  */
-function SceneContents({ pieces, selected, legalDestinations, onSquareClick }: ContentsProps) {
+function SceneContents({ pieces, selected, hovered, legalDestinations, onSquareClick, onSquareHover }: ContentsProps) {
   const wasDrag = useWasDrag()
+  const { gl } = useThree()
   const pieceHitRef = useRef<string | null>(null)
+  const squareHitRef = useRef<string | null>(null)
+  const hoverPieceRef = useRef<string | null>(null)
+  const hoverSquareRef = useRef<string | null>(null)
 
   const handleBoardSquareClick = useCallback(
     (square: string) => {
       const pieceSquare = pieceHitRef.current
       pieceHitRef.current = null
+      squareHitRef.current = null
       if (wasDrag()) return
       onSquareClick({ pieceSquare, square })
     },
     [onSquareClick, wasDrag],
   )
 
+  const settleHover = useCallback(() => {
+    const square = hoverSquareRef.current
+    const pieceSquare = hoverPieceRef.current
+    hoverSquareRef.current = null
+    hoverPieceRef.current = null
+    onSquareHover(square === null ? null : { pieceSquare, square })
+  }, [onSquareHover])
+
+  // El puntero puede salir del canvas sin volver a pasar por ninguna casilla
+  // (se va a otra parte de la página). Sin esto el resalte quedaría clavado
+  // donde estaba.
+  useEffect(() => {
+    const el = gl.domElement
+    const clear = () => onSquareHover(null)
+    el.addEventListener('pointerleave', clear)
+    return () => el.removeEventListener('pointerleave', clear)
+  }, [gl, onSquareHover])
+
+  const handleBoardSquareHover = useCallback((square: string) => {
+    if (hoverSquareRef.current === null) hoverSquareRef.current = square
+  }, [])
+
   return (
     <>
-      <BoardMesh selected={selected} legalDestinations={legalDestinations} onSquareClick={handleBoardSquareClick} />
+      <BoardMesh
+        selected={selected}
+        hovered={hovered}
+        legalDestinations={legalDestinations}
+        onSquareClick={handleBoardSquareClick}
+        onSquareHover={handleBoardSquareHover}
+      />
 
       {pieces.map((p) => {
         const [x, z] = squareToPosition(p.square)
@@ -182,15 +246,28 @@ function SceneContents({ pieces, selected, legalDestinations, onSquareClick }: C
                 // dos).
                 if (pieceHitRef.current === null) pieceHitRef.current = p.square
               }}
+              onPointerMove={() => {
+                if (hoverPieceRef.current === null) hoverPieceRef.current = p.square
+              }}
             />
           </group>
         )
       })}
+
+      <HoverSink onSettle={settleHover} />
     </>
   )
 }
 
-export default function Scene({ pieces, selected, legalDestinations, orientation, onSquareClick }: Props) {
+export default function Scene({
+  pieces,
+  selected,
+  hovered,
+  legalDestinations,
+  orientation,
+  onSquareClick,
+  onSquareHover,
+}: Props) {
   return (
     // shadows="percentage" en vez del default (true -> PCFSoftShadowMap):
     // este three.js lo marca deprecado y cae solo a PCFShadowMap, pero
@@ -221,7 +298,14 @@ export default function Scene({ pieces, selected, legalDestinations, orientation
       />
       <directionalLight position={[-6, 5, -4]} intensity={0.35} />
 
-      <SceneContents pieces={pieces} selected={selected} legalDestinations={legalDestinations} onSquareClick={onSquareClick} />
+      <SceneContents
+        pieces={pieces}
+        selected={selected}
+        hovered={hovered}
+        legalDestinations={legalDestinations}
+        onSquareClick={onSquareClick}
+        onSquareHover={onSquareHover}
+      />
     </Canvas>
   )
 }

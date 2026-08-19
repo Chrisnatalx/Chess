@@ -40,7 +40,8 @@ type Props = {
   kind: PieceKind
   color: 'w' | 'b'
   selected?: boolean
-  onClick?: (e: { stopPropagation: () => void }) => void
+  onClick?: () => void
+  onPointerMove?: () => void
 }
 
 type MatProps = {
@@ -52,7 +53,7 @@ type MatProps = {
 }
 
 /** Una pieza de ajedrez procedural. Torneada para todo salvo el caballo. */
-export function Piece({ kind, color, selected, onClick }: Props) {
+export function Piece({ kind, color, selected, onClick, onPointerMove }: Props) {
   const material = color === 'w' ? WHITE_MATERIAL : BLACK_MATERIAL
 
   const geometry = useMemo(() => {
@@ -79,6 +80,7 @@ export function Piece({ kind, color, selected, onClick }: Props) {
         material={material}
         selected={selected}
         onClick={onClick}
+        onPointerMove={onPointerMove}
       />
     )
   }
@@ -92,16 +94,12 @@ export function Piece({ kind, color, selected, onClick }: Props) {
   }
 
   return (
-    <group
-      onClick={onClick}
-      onPointerOver={(e) => {
-        e.stopPropagation()
-        document.body.style.cursor = 'pointer'
-      }}
-      onPointerOut={() => {
-        document.body.style.cursor = 'default'
-      }}
-    >
+    // Ni onPointerOver ni onPointerOut acá: el cursor lo decide Board3D a
+    // partir de la casilla que el puntero resuelve (que puede no ser esta
+    // pieza), y sobre todo el `stopPropagation` que llevaba el onPointerOver
+    // cortaba la cadena del pointermove antes de que la casilla de abajo y
+    // el HoverSink de Scene.tsx pudieran leerla.
+    <group onClick={onClick} onPointerMove={onPointerMove}>
       <mesh geometry={geometry ?? undefined} castShadow receiveShadow>
         <meshStandardMaterial {...matProps} />
       </mesh>
@@ -193,11 +191,13 @@ function KnightMesh({
   material,
   selected,
   onClick,
+  onPointerMove,
 }: {
   color: 'w' | 'b'
   material: THREE.MeshStandardMaterial
   selected?: boolean
-  onClick?: (e: { stopPropagation: () => void }) => void
+  onClick?: () => void
+  onPointerMove?: () => void
 }) {
   const base = useMemo(() => knightBaseGeometry(), [])
   const head = useMemo(() => knightHeadGeometry(), [])
@@ -219,16 +219,12 @@ function KnightMesh({
     : material
 
   return (
-    <group
-      onClick={onClick}
-      onPointerOver={(e) => {
-        e.stopPropagation()
-        document.body.style.cursor = 'pointer'
-      }}
-      onPointerOut={() => {
-        document.body.style.cursor = 'default'
-      }}
-    >
+    // Ni onPointerOver ni onPointerOut acá: el cursor lo decide Board3D a
+    // partir de la casilla que el puntero resuelve (que puede no ser esta
+    // pieza), y sobre todo el `stopPropagation` que llevaba el onPointerOver
+    // cortaba la cadena del pointermove antes de que la casilla de abajo y
+    // el HoverSink de Scene.tsx pudieran leerla.
+    <group onClick={onClick} onPointerMove={onPointerMove}>
       <mesh geometry={base} material={finalMaterial} castShadow receiveShadow />
       <group position={[0, 0.3, 0]} rotation={[0, facing > 0 ? Math.PI / 2 : -Math.PI / 2, 0]}>
         <mesh
