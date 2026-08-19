@@ -32,7 +32,7 @@ entre ellas.
 ## 3. No objetivos
 
 - No hay reloj de partida, ni por lo tanto derrota por tiempo.
-- No hay revancha ni historial de partidas.
+- No hay historial de partidas.
 - No hay elección de pieza al coronar: se sigue coronando a dama
   automáticamente, en ambos tableros.
 - No se pulen las piezas 3D más allá de lo que produjo la prueba de concepto.
@@ -153,6 +153,67 @@ a HTTP 409. Todos se traducen a español en la interfaz, como el resto.
 - Los espectadores no ven ninguno de estos botones.
 - El final de partida distingue el motivo: "Ganaste, tu rival se rindió",
   "Tablas acordadas", etc.
+
+## 5.6 Revancha
+
+Cuando una partida termina, cualquiera de los dos puede proponer volver a
+jugar. No es una negociación: quien propone ya queda dentro de la partida
+nueva, y al rival le aparece un botón para entrar.
+
+**Los colores se invierten.** Jugar siempre con blancas es una ventaja y en una
+revancha se nota.
+
+**Los dos jugadores conservan su token.** La partida nueva nace con ambos
+asientos ocupados —quien era blancas pasa a negras con el mismo secreto— así
+que nadie tiene que volver a unirse y la partida arranca `active`. Esto es lo
+que hace que la revancha no tenga fricción: sin links que copiar, sin pantalla
+de espera.
+
+**El aviso viaja por donde ya viaja todo lo demás.** La partida terminada guarda
+el id de su revancha en un campo nuevo, `rematchId`. El navegador del rival ya
+consulta el estado cada 4 segundos, así que el botón le aparece solo.
+
+### Modelo de datos
+
+```typescript
+/** Id de la partida creada como revancha de esta, o null si no hay ninguna. */
+rematchId: string | null
+```
+
+### El endpoint
+
+`POST /api/match/:id/rematch`, con `{ token }` en el cuerpo. A diferencia de las
+demás acciones, esta **exige `status: 'finished'`**: una revancha solo existe
+cuando la partida terminó. No lleva `ply`, porque una partida terminada ya no
+avanza.
+
+Devuelve `{ rematchId }`. El cliente navega ahí.
+
+### Idempotencia
+
+Si los dos jugadores hacen click a la vez, debe crearse **una sola** partida. Se
+resuelve con la misma escritura condicional que protege las jugadas:
+
+1. Si la partida ya tiene `rematchId`, se devuelve ese y no se crea nada.
+2. Si no, se crea la partida nueva y se escribe su id con `putIfVersion`.
+3. Si esa escritura pierde la carrera, se vuelve a leer y se devuelve el
+   `rematchId` que ganó — nunca el propio.
+
+El paso 3 es el que importa: sin él, dos clicks simultáneos dejan a los dos
+jugadores en tableros distintos, cada uno esperando a un rival que está en otra
+partida. La partida huérfana queda sin referencias y expira sola a los 7 días.
+
+### Errores
+
+`not_found`, `bad_token`, y `not_finished` (409) cuando la partida sigue en
+curso. Traducidos al español como el resto.
+
+### Interfaz
+
+El botón "Volver a jugar" aparece solo con la partida terminada, y solo a los
+jugadores. Cuando la partida ya tiene `rematchId`, el texto cambia a "Entrar a
+la revancha" para ambos, porque una vez creada da igual quién la propuso.
+Los espectadores no ven ninguno de los dos.
 
 ## 6. Parte B — Tablero dual
 

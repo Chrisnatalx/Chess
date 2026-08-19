@@ -81,13 +81,19 @@ y dentro de `MatchState`, junto a los demás campos:
    * la oferta queda rechazada implícitamente (convención estándar del ajedrez).
    */
   drawOffer: Color | null
+  /** Id de la partida creada como revancha de esta, o null si no hay ninguna. */
+  rematchId: string | null
 ```
+
+Los dos campos se agregan juntos aunque la revancha se implemente en la Task 11:
+subir el esquema invalida las partidas guardadas, y hacerlo dos veces las
+invalidaría dos veces sin necesidad.
 
 `PublicMatch` lo hereda solo, porque se define como `Omit<MatchState, 'players'>`.
 
 - [ ] **Step 4: Inicializarlo y borrarlo donde corresponde**
 
-En `src/server/match.ts`, dentro del objeto que arma `createMatch`, agregar `drawOffer: null`.
+En `src/server/match.ts`, dentro del objeto que arma `createMatch`, agregar `drawOffer: null` y `rematchId: null`.
 
 En `submitMove`, dentro del objeto `siguiente`, agregar:
 
@@ -1204,11 +1210,231 @@ git commit -m "docs: acciones de partida y tablero dual en el README"
 
 ---
 
+### Task 11: Revancha
+
+**Files:**
+- Modify: `src/server/match.ts`
+- Create: `src/app/api/match/[id]/rematch/route.ts`
+- Modify: `src/client/api.ts`, `src/client/useMatch.ts`, `src/components/AccionesPartida.tsx`
+- Test: `src/server/match.test.ts`, `src/app/api/match/routes.test.ts`
+- Test: `e2e/revancha.spec.ts`
+
+**Interfaces:**
+- Consumes: `MatchState.rematchId` (Task 1); `createMatch`, `colorDelToken`, `Deps`, `defaultDeps` de `@/server/match`; `putIfVersion` del almacén.
+- Produces:
+  - `type RematchError = 'not_found' | 'bad_token' | 'not_finished'`
+  - `crearRevancha(store, id, token, deps): Promise<{ rematchId: string } | RematchError>`
+  - `POST /api/match/:id/rematch` → `{ rematchId }`
+  - `apiRematch(id, accessKey, { token })` en el cliente
+
+- [ ] **Step 1: Escribir los tests que fallan**
+
+Agregar a `src/server/match.test.ts`, reutilizando el helper `partidaLista()` que ya existe:
+
+```typescript
+describe('crearRevancha', () => {
+  async function partidaTerminada() {
+    const p = await partidaLista()
+    await submitAction(store, p.id, { token: p.blancas, ply: 0, action: 'resign' })
+    return p
+  }
+
+  it('crea una partida nueva con los colores invertidos y ambos asientos ocupados', async () => {
+    const p = await partidaTerminada()
+    const r = await crearRevancha(store, p.id, p.blancas, deps)
+    expect(typeof r).not.toBe('string')
+    if (typeof r === 'string') return
+
+    const nueva = await store.get(r.rematchId)
+    expect(nueva).not.toBeNull()
+    // Quien era blancas juega negras, con el mismo token.
+    expect(nueva!.players.b.token).toBe(p.blancas)
+    expect(nueva!.players.w.token).toBe(p.negras)
+    // Ambos asientos ocupados: la partida arranca lista para jugar.
+    expect(nueva!.status).toBe('active')
+    expect(nueva!.players.w.open).toBe(false)
+    expect(nueva!.players.b.open).toBe(false)
+    expect(nueva!.history).toEqual([])
+  })
+
+  it('guarda el id de la revancha en la partida vieja', async () => {
+    const p = await partidaTerminada()
+    const r = await crearRevancha(store, p.id, p.blancas, deps)
+    if (typeof r === 'string') throw new Error('esperaba éxito')
+    expect((await store.get(p.id))!.rematchId).toBe(r.rematchId)
+  })
+
+  it('una segunda llamada devuelve la misma revancha, sin crear otra', async () => {
+    const p = await partidaTerminada()
+    const primera = await crearRevancha(store, p.id, p.blancas, deps)
+    const segunda = await crearRevancha(store, p.id, p.negras, deps)
+    if (typeof primera === 'string' || typeof segunda === 'string') {
+      throw new Error('esperaba éxito en ambas')
+    }
+    expect(segunda.rematchId).toBe(primera.rematchId)
+  })
+
+  it('concurrencia: dos clicks simultáneos dejan a los dos en la MISMA partida', async () => {
+    const p = await partidaTerminada()
+    const [a, b] = await Promise.all([
+      crearRevancha(store, p.id, p.blancas, deps),
+      crearRevancha(store, p.id, p.negras, deps),
+    ])
+    if (typeof a === 'string' || typeof b === 'string') {
+      throw new Error('ninguna debería fallar: quien pierde la carrera lee el id ganador')
+    }
+    expect(a.rematchId).toBe(b.rematchId)
+  })
+
+  it('rechaza si la partida sigue en curso', async () => {
+    const p = await partidaLista()
+    expect(await crearRevancha(store, p.id, p.blancas, deps)).toBe('not_finished')
+  })
+
+  it('rechaza un token desconocido', async () => {
+    const p = await partidaTerminada()
+    expect(await crearRevancha(store, p.id, 'intruso', deps)).toBe('bad_token')
+  })
+
+  it('devuelve not_found si la partida no existe', async () => {
+    expect(await crearRevancha(store, 'inexistente', 'x', deps)).toBe('not_found')
+  })
+})
+```
+
+- [ ] **Step 2: Correr y verificar que fallan**
+
+Run: `PATH="$HOME/.nvm/versions/node/v22.12.0/bin:$PATH" npm test src/server/match.test.ts`
+Expected: FAIL — `crearRevancha` no está definida.
+
+- [ ] **Step 3: Implementar**
+
+Agregar a `src/server/match.ts`:
+
+```typescript
+export type RematchError = 'not_found' | 'bad_token' | 'not_finished'
+
+/**
+ * Crea la revancha de una partida terminada, con los colores invertidos y los
+ * dos tokens conservados, así ninguno de los dos tiene que volver a unirse.
+ *
+ * Es idempotente a propósito: si los dos jugadores hacen click a la vez, ambos
+ * terminan en la MISMA partida. Sin eso, cada uno quedaría en un tablero
+ * distinto esperando a un rival que está en otro lado.
+ */
+export async function crearRevancha(
+  store: MatchStore,
+  id: string,
+  token: string,
+  deps: Deps,
+): Promise<{ rematchId: string } | RematchError> {
+  const state = await store.get(id)
+  if (!state) return 'not_found'
+  if (colorDelToken(state, token) === null) return 'bad_token'
+  if (state.status !== 'finished') return 'not_finished'
+
+  // Ya la creó alguien: nadie crea una segunda.
+  if (state.rematchId !== null) return { rematchId: state.rematchId }
+
+  const nueva: MatchState = {
+    id: deps.newId(),
+    schema: SCHEMA_VERSION,
+    history: [],
+    fen: fenOf([]),
+    ply: 0,
+    players: {
+      // Colores invertidos: quien tenía blancas juega negras, con su mismo token.
+      w: { ...state.players.b, open: false },
+      b: { ...state.players.w, open: false },
+    },
+    status: 'active',
+    result: null,
+    reason: null,
+    createdAt: deps.now(),
+    version: 0,
+    drawOffer: null,
+    rematchId: null,
+  }
+  await store.put(nueva)
+
+  const vieja: MatchState = {
+    ...state,
+    rematchId: nueva.id,
+    version: state.version + 1,
+  }
+  const ok = await store.putIfVersion(vieja, state.version)
+  if (ok) return { rematchId: nueva.id }
+
+  // Perdimos la carrera: alguien más ya escribió su revancha. Se devuelve la
+  // suya, no la nuestra, para que los dos jugadores terminen en el mismo
+  // tablero. La partida que creamos queda huérfana y expira sola por TTL.
+  const actual = await store.get(id)
+  if (actual?.rematchId) return { rematchId: actual.rematchId }
+  return 'not_found'
+}
+```
+
+Verificá que `SCHEMA_VERSION` y `fenOf` estén importados en el archivo; si no, agregalos.
+
+- [ ] **Step 4: Correr las pruebas**
+
+Run: `PATH="$HOME/.nvm/versions/node/v22.12.0/bin:$PATH" npm test src/server/match.test.ts`
+Expected: PASS, 7 pruebas nuevas.
+
+- [ ] **Step 5: Verificar que el test de concurrencia es portante**
+
+Quitá temporalmente el bloque que relee tras perder la carrera y hacé que devuelva `nueva.id` siempre. Corré solo ese test y confirmá que **falla** (los dos ids difieren). Revertí y confirmá que vuelve a pasar. Reportá lo que viste.
+
+- [ ] **Step 6: La ruta**
+
+`src/app/api/match/[id]/rematch/route.ts`, siguiendo el patrón exacto de `src/app/api/match/[id]/action/route.ts` — `withAccess`, `isValidMatchId`, cuerpo validado con un type guard, `req.json().catch(() => null)`:
+
+```typescript
+const ESTADO_HTTP: Record<RematchError, number> = {
+  not_found: 404,
+  bad_token: 403,
+  not_finished: 409,
+}
+```
+
+El cuerpo es `{ token: string }`. La respuesta exitosa es `{ rematchId }` — **no** lleva `match`, así que no hay estado que filtrar por `toPublic`.
+
+Agregá a `src/app/api/match/routes.test.ts`: que sin la cabecera de clave da 403; que un cuerpo ausente da 400; que sobre una partida en curso da 409; y que la respuesta contiene el id pero **ningún token de jugador** (assert en el texto crudo, como hacen los tests que ya están).
+
+- [ ] **Step 7: El cliente y el botón**
+
+En `src/client/api.ts`, `apiRematch(id, accessKey, { token })` devolviendo `{ rematchId: string }`, con la misma forma que las demás.
+
+En `src/components/AccionesPartida.tsx`: con `match.status === 'finished'` y el jugador sentado, mostrar **"Volver a jugar"** si `match.rematchId` es null, o **"Entrar a la revancha"** si ya existe. Al hacer click, navegar a `/match/<rematchId>` con el router de Next. Los espectadores no ven ninguno de los dos.
+
+El rival no necesita nada especial: su consulta periódica trae `rematchId` y el botón le cambia solo.
+
+- [ ] **Step 8: Prueba end-to-end**
+
+`e2e/revancha.spec.ts`: dos contextos juegan el mate del loco; blancas hace click en "Volver a jugar" y llega a una partida nueva; negras ve aparecer "Entrar a la revancha" (con `expect(...).toBeVisible()`, que espera la consulta de 4 segundos) y al entrar llega **al mismo id**; y los colores están invertidos — quien jugaba blancas ahora mueve segundo.
+
+- [ ] **Step 9: Verificación completa**
+
+```bash
+export PATH="$HOME/.nvm/versions/node/v22.12.0/bin:$PATH"; set -a; . ./.env.local; set +a
+npm test && npm run lint && npx tsc --noEmit && npx next build && npm run test:e2e
+```
+Expected: todo verde.
+
+- [ ] **Step 10: Commit**
+
+```bash
+git add src/server/match.ts src/server/match.test.ts src/app/api/match/\[id\]/rematch/route.ts src/app/api/match/routes.test.ts src/client/api.ts src/components/AccionesPartida.tsx e2e/revancha.spec.ts
+git commit -m "feat: revancha con colores invertidos"
+```
+
+---
+
 ## Qué queda fuera de este hito
 
 - Piezas 3D más pulidas, animación de captura y sonido.
 - Elección de pieza al coronar: se sigue coronando a dama en ambos tableros.
 - Límite de intentos para la clave de acceso (heredado del hito 1).
-- Reloj de partida, revancha, historial de partidas.
+- Reloj de partida, historial de partidas.
 
 El worktree y la rama `spike/tablero-3d` se descartan cuando este hito cierre.
