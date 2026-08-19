@@ -70,13 +70,16 @@ Abrí <http://localhost:3000>.
    solo, sin recargar, en unos segundos.
 
 Cualquiera que tenga el link y la clave de acceso puede abrir la partida sin
-sumarse como jugador: la ve como **espectador**, con el tablero al día pero
-sin poder mover ni ocupar el asiento libre.
+sumarse como jugador: la ve como **espectador**, con el tablero al día. El
+asiento de negras es por orden de llegada — mientras siga libre, cualquiera
+con el link y la clave puede ocuparlo, no solo a quien el creador se lo haya
+pasado. Compartir el link es, en los hechos, invitar a cualquiera con la
+clave a jugar, no solo a mirar.
 
 ## Comandos
 
 - `npm run dev` — servidor de desarrollo.
-- `npm test` — pruebas unitarias e de integración (Vitest).
+- `npm test` — pruebas unitarias y de integración (Vitest).
 - `npm run test:e2e` — pruebas end-to-end con navegadores reales (Playwright).
 - `npm run lint` — ESLint.
 - `npm run build` — build de producción.
@@ -156,6 +159,14 @@ Verificá las tres antes de compartir el link con nadie.
 - No hay reloj de partida.
 - No hay panel de historial de jugadas visible en la UI.
 - No hay revancha: terminada una partida, hay que crear una nueva.
+- **Las partidas expiran a los 7 días** (el TTL configurado en Redis): pasado
+  ese tiempo, el registro desaparece y el link deja de funcionar.
+- **Perder el localStorage del navegador pierde el asiento para siempre.**
+  El token que identifica a cada jugador vive únicamente ahí — no hay cuenta
+  ni login. Una ventana privada, borrar datos del sitio, o abrir el link
+  desde otro dispositivo del mismo jugador significa quedar afuera de esa
+  partida sin forma de recuperar el asiento, y la partida no se puede
+  terminar porque los asientos no se reabren.
 
 ## Más información
 
