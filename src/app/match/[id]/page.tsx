@@ -65,6 +65,24 @@ function mensajeDeUnirse(codigo: string): string {
   return 'No se pudo unir por un problema de conexión. Probá de nuevo.'
 }
 
+// Lado del cuadro que contiene el tablero, en ambos modos. Crece con el
+// viewport (92vw) hasta un tope prolijo en pantallas grandes (900px), pero
+// también se lo acota por alto (100dvh menos ~260px de cabecera y pie:
+// selector de modo, link de invitación, indicador de turno y mensajes de
+// estado) para que esos controles sigan visibles sin scroll en una laptop
+// normal. `dvh` en vez de `vh` porque en el celular la barra del navegador
+// entra y sale del viewport dinámico; `vh` fijo mediría un alto que a veces
+// no está disponible de verdad.
+//
+// El 2D ya es cuadrado por su cuenta (react-chessboard mide el ancho de su
+// contenedor y usa esa misma medida como alto), así que basta con fijarle
+// este mismo valor de ancho. El 3D no tiene ese mecanismo — su contenedor es
+// un `width:100%; height:100%` que, sin un alto propio en el padre, mide 0 —
+// así que aquí se le da un alto explícito con el MISMO valor: el cuadro que
+// ve el jugador es idéntico en tamaño en los dos modos, así que cambiar de
+// uno a otro no reacomoda nada alrededor.
+const LADO_TABLERO = 'min(92vw, 900px, calc(100dvh - 260px))'
+
 export default function MatchPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params)
   const { match, errorSincronizacion, errorJugada, mover, refrescar, esperaAbandonada } = useMatch(id)
@@ -176,8 +194,8 @@ export default function MatchPage({ params }: { params: Promise<{ id: string }> 
   }
 
   return (
-    <main style={{ maxWidth: 560, margin: '2rem auto', fontFamily: 'system-ui' }}>
-      <div style={{ maxWidth: 480, margin: '0 auto' }}>
+    <main style={{ maxWidth: 960, margin: '2rem auto', fontFamily: 'system-ui' }}>
+      <div style={{ width: LADO_TABLERO, margin: '0 auto' }}>
         {modo !== null && (
           <SelectorTablero modo={modo} webglDisponible={webglDisponible} onCambiar={setModo} />
         )}
@@ -187,7 +205,14 @@ export default function MatchPage({ params }: { params: Promise<{ id: string }> 
           </p>
         )}
         {modo === null && <p>Cargando tablero…</p>}
-        {modo === '3d' && <Board3D {...propsTablero} />}
+        {modo === '3d' && (
+          // Ver el comentario de `LADO_TABLERO`: sin este alto explícito,
+          // Board3D hereda un `height: 100%` de un contenedor sin alto
+          // propio y el canvas colapsa.
+          <div style={{ width: '100%', height: LADO_TABLERO }}>
+            <Board3D {...propsTablero} />
+          </div>
+        )}
         {modo === '2d' && <Board2D {...propsTablero} />}
       </div>
 
