@@ -1,4 +1,5 @@
-import { Chess, type Square } from 'chess.js'
+import type { Square } from 'chess.js'
+import { replay } from '@/core/game'
 
 const PATRON_CASILLA = /^[a-h][1-8]$/
 
@@ -17,7 +18,9 @@ function esCasilla(valor: string): valor is Square {
  */
 export function destinosLegales(history: string[], desde: string): string[] {
   if (!esCasilla(desde)) return []
-  const chess = new Chess()
-  for (const san of history) chess.move(san)
+  // Misma reconstrucción que el resto de la base (`@/core/game`), no una
+  // copia propia: dos loops idénticos divergiendo en el manejo de errores
+  // es exactamente el tipo de duplicación que después rompe en silencio.
+  const chess = replay(history)
   return chess.moves({ square: desde, verbose: true }).map((m) => m.to)
 }

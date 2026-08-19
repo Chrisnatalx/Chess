@@ -15,7 +15,7 @@ export type AppliedMove = { history: string[]; fen: string; san: string }
  * la repetición triple y la regla de 50 jugadas no se pueden derivar
  * de un FEN suelto.
  */
-function replay(history: string[]): Chess {
+export function replay(history: string[]): Chess {
   const chess = new Chess()
   for (const san of history) chess.move(san)
   return chess
