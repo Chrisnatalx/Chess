@@ -76,9 +76,11 @@ export function useMatch(id: string) {
       const { match: m } = await apiGet(id, loadAccessKey())
       aplicarRef.current(m)
       setError(null)
+      fallosConsecutivos.current = 0
       return true
     } catch (e) {
       setError(e instanceof Error ? e.message : 'error')
+      fallosConsecutivos.current += 1
       return false
     }
   }, [id])
@@ -104,26 +106,32 @@ export function useMatch(id: string) {
         esMiTurno,
         visible: typeof document === 'undefined' || document.visibilityState === 'visible',
       }
-      // Sin partida todavía (primer montaje, o el intento anterior falló):
-      // se consulta igual, sin esperar a que shouldPoll lo autorice — si no,
-      // un primer fallo dejaría la partida en null para siempre.
-      const necesitaConsultar = actual === null || shouldPoll(ctx)
+      // Sin partida todavía (primer montaje, o el intento anterior falló), o
+      // con fallos pendientes de confirmar (un poll o un /move recientes no
+      // llegaron a buen puerto): se consulta igual, sin esperar a que
+      // shouldPoll lo autorice. Si no, un cliente que cree —con datos
+      // locales nunca actualizados— que es su turno se queda sin consultar
+      // para siempre: `shouldPoll` da `false` con `esMiTurno: true` sin
+      // importar cuánto haya fallado la sincronización.
+      const necesitaConsultar =
+        actual === null || fallosConsecutivos.current > 0 || shouldPoll(ctx)
 
-      let exito = true
       try {
-        if (necesitaConsultar) exito = await refrescar()
+        if (necesitaConsultar) await refrescar()
       } finally {
         enVuelo = false
         // Reprogramar SIEMPRE acá, tanto si hubo éxito como si no: es lo
         // que impide que un solo fallo detenga el ciclo para siempre.
+        // `fallosConsecutivos` ya quedó al día a esta altura: `refrescar()`
+        // lo resetea a 0 en éxito y lo incrementa en fallo, y es la misma
+        // referencia que usa el catch de `mover`.
         if (!cancelado) {
-          fallosConsecutivos.current = exito ? 0 : fallosConsecutivos.current + 1
           const base = pollInterval(
             ultimoCambio.current === null ? 0 : Date.now() - ultimoCambio.current,
           )
-          const espera = exito
-            ? base
-            : Math.min(base * 2 ** fallosConsecutivos.current, TECHO_BACKOFF)
+          const espera = fallosConsecutivos.current > 0
+            ? Math.min(base * 2 ** fallosConsecutivos.current, TECHO_BACKOFF)
+            : base
           temporizador = setTimeout(() => { void tick() }, espera)
         }
       }
@@ -163,10 +171,17 @@ export function useMatch(id: string) {
           token: creds.token, ply: actual.ply, from, to, promotion,
         })
         aplicarRef.current(m)
+        fallosConsecutivos.current = 0
         return true
       } catch (e) {
         setError(e instanceof Error ? e.message : 'error')
-        // Se refresca para que el tablero vuelva al estado real del servidor.
+        // Se incrementa el contador acá mismo, de forma síncrona, y no solo
+        // a través del refrescar() de abajo: eso fuerza a que los próximos
+        // ticks consulten sin importar `shouldPoll`, incluso si ese
+        // refrescar tarda en resolver o también falla. Se refresca además
+        // para que el tablero vuelva al estado real del servidor en cuanto
+        // la red lo permita.
+        fallosConsecutivos.current += 1
         void refrescar()
         return false
       }

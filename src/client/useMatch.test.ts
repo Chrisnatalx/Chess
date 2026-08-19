@@ -168,4 +168,52 @@ describe('useMatch (regresión, con estado)', () => {
       expect(result.current.match?.ply).toBe(1)
     },
   )
+
+  it(
+    'IMPORTANTE 1: un /move fallido no debe frenar el sondeo para siempre, ' +
+      'aunque el cliente siga creyendo que es su turno',
+    async () => {
+      vi.useFakeTimers()
+      const get = vi.mocked(api.apiGet)
+      const move = vi.mocked(api.apiMove)
+
+      // Carga inicial: ply 0, turno de blancas — coincide con las
+      // credenciales mockeadas (color 'w'), así que el cliente cree que es
+      // su turno.
+      get.mockResolvedValueOnce({ match: partida(0, 10) })
+
+      const { result } = renderHook(() => useMatch('m1'))
+      await vi.waitFor(() => expect(get).toHaveBeenCalledTimes(1))
+
+      // La jugada falla en el POST (bache de red), y el refresco inmediato
+      // que dispara el catch de `mover` también falla: la misma ráfaga de
+      // red se lleva puesta ambas peticiones.
+      move.mockRejectedValueOnce(new Error('network'))
+      get.mockRejectedValueOnce(new Error('network'))
+
+      await act(async () => {
+        await result.current.mover('e2', 'e4')
+        // El catch de `mover` dispara `refrescar()` sin esperarlo: se le
+        // da un par de vueltas al microtask queue para que también se
+        // resuelva (con su propio rechazo, atrapado adentro).
+        await Promise.resolve()
+        await Promise.resolve()
+      })
+
+      const llamadasTrasElFallo = get.mock.calls.length
+
+      // De acá en más el servidor respondería bien si se le preguntara de
+      // nuevo — la jugada pudo haber llegado, o no, pero consultando se
+      // sabría.
+      get.mockResolvedValue({ match: partida(0, 10) })
+
+      await vi.advanceTimersByTimeAsync(120_000)
+
+      // Contra el código sin arreglar, el cliente sigue creyendo (con
+      // datos locales nunca actualizados) que es su turno tras el fallo,
+      // así que `shouldPoll` da `false` en todos los ticks siguientes y
+      // `llamadasTrasElFallo` queda como techo para siempre.
+      expect(get.mock.calls.length).toBeGreaterThan(llamadasTrasElFallo)
+    },
+  )
 })
