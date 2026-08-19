@@ -1,7 +1,7 @@
 'use client'
 
 import { use, useState } from 'react'
-import { Board } from '@/components/Board'
+import { Board2D } from '@/components/Board2D'
 import { useMatch, turnoDe } from '@/client/useMatch'
 import { apiJoin, loadAccessKey, loadCreds, saveAccessKey, saveCreds } from '@/client/api'
 import type { Color } from '@/core/match-state'
@@ -132,7 +132,7 @@ export default function MatchPage({ params }: { params: Promise<{ id: string }> 
   return (
     <main style={{ maxWidth: 560, margin: '2rem auto', fontFamily: 'system-ui' }}>
       <div style={{ maxWidth: 480, margin: '0 auto' }}>
-        <Board
+        <Board2D
           fen={match.fen}
           history={match.history}
           orientation={color ?? 'w'}
